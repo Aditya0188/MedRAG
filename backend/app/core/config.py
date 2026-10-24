@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     
     # AI Credentials & Model Config
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3.8-flash"
+    GEMINI_MODEL: str = "gemini-3.1-flash-lite"
     EMBEDDING_MODEL: str = "gemini-embedding-001"
     
     # Database
@@ -50,7 +50,7 @@ class Settings(BaseSettings):
         return v
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "backend/.env", "../.env"),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"

@@ -65,18 +65,38 @@ def extract_prescription_with_gemini(file_path: str) -> VisionExtractionOutput:
 
     client = genai.Client(api_key=api_key)
     
-    with open(file_path, "rb") as f:
-        file_bytes = f.read()
+    import io
+    from PIL import Image
 
-    # Determine mime type
+    # Determine mime type and optimize image payload for ultra-fast network transfer & vision latency
     mime_type = "image/jpeg"
     lower_path = file_path.lower()
-    if lower_path.endswith(".png"):
-        mime_type = "image/png"
-    elif lower_path.endswith(".webp"):
-        mime_type = "image/webp"
-    elif lower_path.endswith(".pdf"):
+    if lower_path.endswith(".pdf"):
         mime_type = "application/pdf"
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+    else:
+        try:
+            img = Image.open(file_path)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            # Downscale exceptionally large smartphone photos (> 1600px) while maintaining crisp resolution
+            max_dim = max(img.size)
+            if max_dim > 1600:
+                scale = 1600.0 / max_dim
+                new_size = (int(img.width * scale), int(img.height * scale))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=88, optimize=True)
+            file_bytes = buf.getvalue()
+            mime_type = "image/jpeg"
+        except Exception:
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            if lower_path.endswith(".png"):
+                mime_type = "image/png"
+            elif lower_path.endswith(".webp"):
+                mime_type = "image/webp"
 
     prompt = (
         "Carefully read and transcribe ALL patient details, doctor details, and every prescribed medication from this medical document. "
@@ -85,55 +105,57 @@ def extract_prescription_with_gemini(file_path: str) -> VisionExtractionOutput:
         "duration_as_written, timing_as_written, food_instructions_as_written, confidence, and uncertainty_flags."
     )
 
+    # Fast models ordered by lowest latency (sub-5s) with seamless fallbacks
+    fast_fallback_order = [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-flash-lite-latest",
+        "gemini-3.8-flash"
+    ]
     candidate_models = []
     if settings.GEMINI_MODEL:
         candidate_models.append(settings.GEMINI_MODEL)
-    for fallback in ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.5-flash"]:
-        if fallback not in candidate_models:
-            candidate_models.append(fallback)
+    for model_candidate in fast_fallback_order:
+        if model_candidate not in candidate_models:
+            candidate_models.append(model_candidate)
 
     last_error = None
     for model_name in candidate_models:
         logger.info(f"Attempting prescription extraction with model '{model_name}'...")
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[
-                        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-                        prompt
-                    ],
-                    config=types.GenerateContentConfig(
-                        system_instruction=VISION_SYSTEM_INSTRUCTION,
-                        response_mime_type="application/json",
-                        response_schema=VisionExtractionOutput,
-                        temperature=0.1,  # Low temperature for factual fidelity
-                    )
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=VISION_SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=VisionExtractionOutput,
+                    temperature=0.1,  # Low temperature for factual fidelity
                 )
+            )
 
-                raw_json_str = response.text.strip()
-                # Remove markdown code fences if model enclosed JSON
-                if raw_json_str.startswith("```"):
-                    lines = raw_json_str.split("\n")
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].startswith("```"):
-                        lines = lines[:-1]
-                    raw_json_str = "\n".join(lines).strip()
+            raw_json_str = response.text.strip()
+            # Remove markdown code fences if model enclosed JSON
+            if raw_json_str.startswith("```"):
+                lines = raw_json_str.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_json_str = "\n".join(lines).strip()
 
-                data_dict = json.loads(raw_json_str)
-                validated_output = VisionExtractionOutput(**data_dict)
-                logger.info(f"Gemini Vision successfully extracted {len(validated_output.medicines)} medicines from {file_path} using model {model_name}")
-                return validated_output
+            data_dict = json.loads(raw_json_str)
+            validated_output = VisionExtractionOutput(**data_dict)
+            logger.info(f"Gemini Vision successfully extracted {len(validated_output.medicines)} medicines from {file_path} using model {model_name}")
+            return validated_output
 
-            except Exception as e:
-                err_str = str(e)
-                last_error = e
-                logger.warning(f"Model '{model_name}' attempt {attempt+1} failed: {err_str}")
-                # If model is 404 or deprecated, do not retry this model; proceed to next candidate
-                if "404" in err_str or "no longer available" in err_str or "not found" in err_str.lower():
-                    logger.info(f"Model '{model_name}' is unavailable/deprecated; switching to next candidate model.")
-                    break
-                time.sleep(1.5)
+        except Exception as e:
+            err_str = str(e)
+            last_error = e
+            logger.warning(f"Model '{model_name}' failed: {err_str}; falling to next candidate model immediately.")
+            continue
 
     raise RuntimeError(f"Vision model extraction failed across all candidate models: {str(last_error)}")
