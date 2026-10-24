@@ -28,11 +28,14 @@ const NAV_ITEMS = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const [mounted, setMounted] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState<"checking" | "online" | "offline">("checking");
   const [hasApiKey, setHasApiKey] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
+
     api.getHealth()
       .then(() => setBackendStatus("online"))
       .catch(() => setBackendStatus("offline"));
@@ -120,12 +123,12 @@ export default function Sidebar() {
             <span className="text-[11px] font-mono font-medium text-[#747D78]">Gemini Vision</span>
             <span
               className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
-                hasApiKey
+                mounted && hasApiKey
                   ? "bg-[#EDF7EE] text-[#2E7D32] border border-[#2E7D32]/20"
                   : "bg-[#FCF5EB] text-[#A56A19] border border-[#A56A19]/20"
               }`}
             >
-              {hasApiKey ? "ACTIVE" : "KEY NEEDED"}
+              {mounted && hasApiKey ? "ACTIVE" : "CHECKING"}
             </span>
           </div>
 
@@ -135,14 +138,14 @@ export default function Sidebar() {
             <span className="flex items-center gap-1.5">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  backendStatus === "online"
+                  mounted && backendStatus === "online"
                     ? "bg-[#2E7D32]"
-                    : backendStatus === "checking"
-                    ? "bg-[#A56A19] animate-pulse"
-                    : "bg-[#A33F38]"
+                    : mounted && backendStatus === "offline"
+                    ? "bg-[#A33F38]"
+                    : "bg-[#A56A19] animate-pulse"
                 }`}
               />
-              <span className="capitalize">{backendStatus}</span>
+              <span className="capitalize">{mounted ? backendStatus : "checking"}</span>
             </span>
           </div>
         </div>

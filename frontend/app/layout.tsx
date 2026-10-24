@@ -29,8 +29,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${instrumentSans.variable} ${ibmPlexMono.variable}`}>
-      <body className="min-h-screen bg-[#F7F6F2] text-[#202722] flex">
+    <html lang="en" className={`${instrumentSans.variable} ${ibmPlexMono.variable}`} suppressHydrationWarning>
+      <body className="min-h-screen bg-[#F7F6F2] text-[#202722] flex" suppressHydrationWarning>
         {/* Compact Clinical Sidebar with Suspense */}
         <Suspense fallback={<aside className="w-64 bg-[#F7F6F2] border-r border-[#E5E3DC] hidden lg:block" />}>
           <Sidebar />
