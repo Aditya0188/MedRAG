@@ -85,35 +85,55 @@ def extract_prescription_with_gemini(file_path: str) -> VisionExtractionOutput:
         "duration_as_written, timing_as_written, food_instructions_as_written, confidence, and uncertainty_flags."
     )
 
-    max_retries = 3
-    delay = 2.0
+    candidate_models = []
+    if settings.GEMINI_MODEL:
+        candidate_models.append(settings.GEMINI_MODEL)
+    for fallback in ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.5-flash"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
 
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=settings.GEMINI_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-                    prompt
-                ],
-                config=types.GenerateContentConfig(
-                    system_instruction=VISION_SYSTEM_INSTRUCTION,
-                    response_mime_type="application/json",
-                    response_schema=VisionExtractionOutput,
-                    temperature=0.1,  # Low temperature for factual fidelity
+    last_error = None
+    for model_name in candidate_models:
+        logger.info(f"Attempting prescription extraction with model '{model_name}'...")
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+                        prompt
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=VISION_SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        response_schema=VisionExtractionOutput,
+                        temperature=0.1,  # Low temperature for factual fidelity
+                    )
                 )
-            )
 
-            raw_json_str = response.text
-            data_dict = json.loads(raw_json_str)
-            validated_output = VisionExtractionOutput(**data_dict)
-            logger.info(f"Gemini Vision successfully extracted {len(validated_output.medicines)} medicines from {file_path}")
-            return validated_output
+                raw_json_str = response.text.strip()
+                # Remove markdown code fences if model enclosed JSON
+                if raw_json_str.startswith("```"):
+                    lines = raw_json_str.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].startswith("```"):
+                        lines = lines[:-1]
+                    raw_json_str = "\n".join(lines).strip()
 
-        except Exception as e:
-            logger.warning(f"Gemini Vision extraction attempt {attempt+1} failed: {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise RuntimeError(f"Vision model extraction failed after {max_retries} attempts: {str(e)}")
+                data_dict = json.loads(raw_json_str)
+                validated_output = VisionExtractionOutput(**data_dict)
+                logger.info(f"Gemini Vision successfully extracted {len(validated_output.medicines)} medicines from {file_path} using model {model_name}")
+                return validated_output
+
+            except Exception as e:
+                err_str = str(e)
+                last_error = e
+                logger.warning(f"Model '{model_name}' attempt {attempt+1} failed: {err_str}")
+                # If model is 404 or deprecated, do not retry this model; proceed to next candidate
+                if "404" in err_str or "no longer available" in err_str or "not found" in err_str.lower():
+                    logger.info(f"Model '{model_name}' is unavailable/deprecated; switching to next candidate model.")
+                    break
+                time.sleep(1.5)
+
+    raise RuntimeError(f"Vision model extraction failed across all candidate models: {str(last_error)}")

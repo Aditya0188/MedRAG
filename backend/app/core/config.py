@@ -12,12 +12,12 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     
     # Mode: "demo" or "live"
-    APP_MODE: str = "demo"
+    APP_MODE: str = "live"
     
     # AI Credentials & Model Config
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
-    EMBEDDING_MODEL: str = "text-embedding-004"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     
     # Database
     DATABASE_URL: str = "sqlite:///./data/meddrag.db"
