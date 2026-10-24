@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/venv/
+backend/env/
+.venv/
+env/
+venv/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# SQLite Databases & Test DBs
+data/
+backend/data/*.db
+backend/data/test_meddrag.db
+*.db
+*.db-journal
+
+# Uploads & Runtime Data
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+backend/data/samples/*
+backend/data/qdrant/*
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+.npm
+npm-debug.log*
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+
+# IDE & OS Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
