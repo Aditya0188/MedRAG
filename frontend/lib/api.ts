@@ -315,6 +315,15 @@ export const api = {
 
   getKeyStatus: () => request<{ has_key: boolean; model: string }>("/settings/key/status"),
 
+  updateFdaApiKey: (apiKey: string) =>
+    request<{ status: string; message: string; has_key: boolean }>("/settings/fda-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+
+  getFdaKeyStatus: () => request<{ has_key: boolean; rate_limit: string }>("/settings/fda-key/status"),
+
   // Demo Controls
   getDemoScenarios: () => request<DemoScenario[]>("/demo/scenarios"),
   resetDemoData: () =>

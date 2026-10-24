@@ -228,8 +228,11 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                 med_name = med_rec.normalized_name or med_rec.original_name
                 clean_lookup_name = med_name.replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").strip()
                 
-                # 1. Search Qdrant vector index
+                # 1. Search Qdrant vector index (try normalized name, base ingredient, or original name)
+                clean_orig = med_rec.original_name.replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").replace("Inj.", "").strip()
                 qdrant_hits = evidence_store.search_evidence(clean_lookup_name)
+                if not qdrant_hits and clean_orig.lower() != clean_lookup_name.lower():
+                    qdrant_hits = evidence_store.search_evidence(clean_orig)
                 
                 if qdrant_hits:
                     for hit in qdrant_hits[:2]:

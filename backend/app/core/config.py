@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     RXNORM_API_BASE: str = "https://rxnav.nlm.nih.gov/REST"
     DAILYMED_API_BASE: str = "https://dailymed.nlm.nih.gov/dailymed/services/v2"
     OPENFDA_API_BASE: str = "https://api.fda.gov/drug/label.json"
+    OPENFDA_API_KEY: str = ""
     
     # CORS
     CORS_ORIGINS: Union[List[str], str] = [

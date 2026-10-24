@@ -8,9 +8,29 @@ import {
   ShieldAlert,
   Filter,
   RefreshCw,
-  FileText
+  FileText,
+  CheckCircle2,
+  Database
 } from "lucide-react";
 import { api, Evidence } from "@/lib/api";
+
+const QUICK_SEARCH_CHIPS = [
+  "All",
+  "Amoxicillin",
+  "Augmentin",
+  "Ciprofloxacin",
+  "Azithromycin",
+  "Ibuprofen",
+  "Paracetamol",
+  "Atorvastatin",
+  "Metformin",
+  "Pantoprazole",
+  "Levothyroxine",
+  "Warfarin",
+  "Grapefruit",
+  "Milk / Dairy",
+  "Alcohol"
+];
 
 export default function EvidenceLibraryPage() {
   const [evidences, setEvidences] = useState<Evidence[]>([]);
@@ -19,13 +39,15 @@ export default function EvidenceLibraryPage() {
 
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [activeChip, setActiveChip] = useState("All");
 
-  const loadEvidence = async () => {
+  const loadEvidence = async (overrideQuery?: string) => {
     try {
       setLoading(true);
       setError(null);
+      const queryToUse = overrideQuery !== undefined ? overrideQuery : search;
       const data = await api.searchEvidenceLibrary(
-        search.trim() || undefined,
+        queryToUse.trim() || undefined,
         selectedCategory === "all" ? undefined : selectedCategory
       );
       setEvidences(data);
@@ -42,7 +64,15 @@ export default function EvidenceLibraryPage() {
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
+    setActiveChip("Custom");
     loadEvidence();
+  };
+
+  const handleChipClick = (chip: string) => {
+    setActiveChip(chip);
+    const query = chip === "All" ? "" : chip;
+    setSearch(query);
+    loadEvidence(query);
   };
 
   return (
@@ -50,8 +80,11 @@ export default function EvidenceLibraryPage() {
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#E5E3DC]">
         <div>
-          <h1 className="text-2xl font-semibold text-[#202722] tracking-tight">
+          <h1 className="text-2xl font-semibold text-[#202722] tracking-tight flex items-center gap-2">
             Official Drug Evidence Library
+            <span className="text-xs font-mono font-normal px-2.5 py-0.5 rounded-full bg-[#E8EEE8] text-[#315C4C] border border-[#315C4C]/20">
+              {evidences.length} Passages Indexed
+            </span>
           </h1>
           <p className="text-xs text-[#747D78] mt-1">
             Ground-truth drug labeling repository retrieved from official NLM DailyMed SPL and openFDA endpoints, indexed in Qdrant.
@@ -59,11 +92,34 @@ export default function EvidenceLibraryPage() {
         </div>
 
         <button
-          onClick={loadEvidence}
-          className="p-2 rounded-md border border-[#E5E3DC] bg-white text-[#747D78] hover:text-[#202722] hover:bg-[#F1EFEA] flex items-center gap-1.5 text-xs font-medium self-start md:self-auto"
+          onClick={() => loadEvidence()}
+          className="p-2 rounded-md border border-[#E5E3DC] bg-white text-[#747D78] hover:text-[#202722] hover:bg-[#F1EFEA] flex items-center gap-1.5 text-xs font-medium self-start md:self-auto transition-colors"
         >
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh Library
         </button>
+      </div>
+
+      {/* Quick Search Chips */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
+        <span className="text-[11px] font-mono text-[#747D78] uppercase mr-1 flex items-center gap-1">
+          <Database size={12} /> Filter:
+        </span>
+        {QUICK_SEARCH_CHIPS.map((chip) => {
+          const isActive = activeChip === chip;
+          return (
+            <button
+              key={chip}
+              onClick={() => handleChipClick(chip)}
+              className={`px-2.5 py-1 rounded text-xs whitespace-nowrap transition-colors ${
+                isActive
+                  ? "bg-[#315C4C] text-white font-medium shadow-xs"
+                  : "bg-white border border-[#E5E3DC] text-[#747D78] hover:text-[#202722] hover:border-[#315C4C]/40"
+              }`}
+            >
+              {chip}
+            </button>
+          );
+        })}
       </div>
 
       {/* Search and Filters */}
@@ -84,7 +140,7 @@ export default function EvidenceLibraryPage() {
           <select
             value={selectedCategory}
             onChange={(e) => setSelectedCategory(e.target.value)}
-            className="px-2.5 py-1.5 rounded border border-[#E5E3DC] bg-white text-[#202722] text-xs"
+            className="px-2.5 py-1.5 rounded border border-[#E5E3DC] bg-white text-[#202722] text-xs focus:outline-none focus:border-[#315C4C]"
           >
             <option value="all">All Evidence Categories</option>
             <option value="avoid_contraindicated">Avoid / Contraindicated</option>
@@ -101,7 +157,7 @@ export default function EvidenceLibraryPage() {
           Searching official FDA drug labeling passages in Qdrant...
         </div>
       ) : error ? (
-        <div className="p-8 text-center text-xs text-[#A33F38] bg-[#FAEEEE]">
+        <div className="p-8 text-center text-xs text-[#A33F38] bg-[#FAEEEE] rounded-lg border border-[#A33F38]/20">
           {error}
         </div>
       ) : evidences.length === 0 ? (
@@ -109,7 +165,7 @@ export default function EvidenceLibraryPage() {
           <BookOpen size={28} className="mx-auto text-[#747D78]" />
           <h3 className="text-sm font-semibold text-[#202722]">No Matching Evidence Passages</h3>
           <p className="text-xs text-[#747D78]">
-            Process a prescription in New Analysis to automatically fetch and index new drug labeling documents.
+            No records matched &quot;{search}&quot;. Try selecting &quot;All&quot; or searching by active generic name.
           </p>
         </div>
       ) : (
@@ -126,30 +182,32 @@ export default function EvidenceLibraryPage() {
             return (
               <div
                 key={ev.id}
-                className="p-5 rounded-lg bg-white border border-[#E5E3DC] space-y-3 hover:border-[#315C4C] transition-colors"
+                className="p-5 rounded-lg bg-white border border-[#E5E3DC] space-y-3 hover:border-[#315C4C] transition-colors flex flex-col justify-between"
               >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h3 className="font-bold text-sm text-[#202722]">{ev.medicine_name}</h3>
-                    <p className="text-xs text-[#747D78] mt-0.5">
-                      Substance: <span className="font-medium text-[#202722]">{ev.food_or_substance}</span>
-                    </p>
+                <div className="space-y-3">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="font-bold text-sm text-[#202722]">{ev.medicine_name}</h3>
+                      <p className="text-xs text-[#747D78] mt-0.5">
+                        Substance / Factor: <span className="font-medium text-[#202722]">{ev.food_or_substance}</span>
+                      </p>
+                    </div>
+                    <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded ${badge.bg} ${badge.text}`}>
+                      {badge.label}
+                    </span>
                   </div>
-                  <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded ${badge.bg} ${badge.text}`}>
-                    {badge.label}
-                  </span>
+
+                  <div className="p-3 rounded bg-[#F7F6F2] border border-[#E5E3DC] text-xs text-[#202722] leading-snug">
+                    {ev.plain_language_summary}
+                  </div>
+
+                  <div className="text-[11px] text-[#747D78] italic pl-2 border-l-2 border-[#315C4C]">
+                    &quot;{ev.evidence_excerpt}&quot;
+                  </div>
                 </div>
 
-                <div className="p-3 rounded bg-[#F7F6F2] border border-[#E5E3DC] text-xs text-[#202722] leading-snug">
-                  {ev.plain_language_summary}
-                </div>
-
-                <div className="text-[11px] text-[#747D78] italic pl-2 border-l-2 border-[#315C4C]">
-                  &quot;{ev.evidence_excerpt}&quot;
-                </div>
-
-                <div className="pt-2 text-[10px] text-[#747D78] font-mono border-t border-[#F1EFEA] flex items-center justify-between">
-                  <span className="truncate max-w-[240px]">
+                <div className="pt-3 text-[10px] text-[#747D78] font-mono border-t border-[#F1EFEA] flex items-center justify-between mt-2">
+                  <span className="truncate max-w-[260px]">
                     {ev.source_provider} • {ev.source_document_title}
                   </span>
                   <a

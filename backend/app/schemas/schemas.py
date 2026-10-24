@@ -69,7 +69,7 @@ class EvidenceBase(BaseModel):
 
 class EvidenceResponse(EvidenceBase):
     id: str
-    analysis_id: str
+    analysis_id: Optional[str] = "global_catalog"
     medicine_id: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
@@ -234,6 +234,13 @@ class DashboardMetricsResponse(BaseModel):
 # -------------------------------------------------------------
 # Dependency Health Schemas
 # -------------------------------------------------------------
+class SystemHealthResponse(BaseModel):
+    status: str
+    app_name: str
+    version: str
+    mode: str
+
+
 class ServiceHealth(BaseModel):
     status: str  # "healthy", "degraded", "unavailable"
     latency_ms: Optional[float] = None

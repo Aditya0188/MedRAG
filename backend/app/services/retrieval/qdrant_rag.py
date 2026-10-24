@@ -23,7 +23,7 @@ def compute_deterministic_text_vector(text: str, dim: int = VECTOR_DIMENSION) ->
     cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", text.lower())
     words = cleaned.split()
     vector = [0.0] * dim
-    
+
     if not words:
         return [1.0 / math.sqrt(dim)] * dim
 
@@ -47,6 +47,7 @@ class QdrantEvidenceStore:
     def __init__(self):
         self.client: Optional[QdrantClient] = None
         self._initialize_client()
+        self._seed_curated_catalog()
 
     def _initialize_client(self):
         try:
@@ -77,6 +78,16 @@ class QdrantEvidenceStore:
             logger.error(f"Failed to initialize Qdrant client: {str(e)}")
             self.client = None
 
+    def _seed_curated_catalog(self):
+        """Pre-seeds vector store with the 55+ curated FDA drug-food interaction database."""
+        try:
+            from app.services.retrieval.curated_fda_catalog import get_curated_evidence_catalog
+            catalog = get_curated_evidence_catalog()
+            self.upsert_evidence_chunks(catalog)
+            logger.info(f"Loaded {len(catalog)} gold-standard FDA evidence passages into Qdrant store.")
+        except Exception as e:
+            logger.warning(f"Failed to seed curated FDA evidence into Qdrant: {str(e)}")
+
     def upsert_evidence_chunks(self, chunks: List[Dict[str, Any]]):
         """Indexes evidence passages into Qdrant."""
         if not self.client or not chunks:
@@ -86,8 +97,9 @@ class QdrantEvidenceStore:
         for i, chunk in enumerate(chunks):
             passage_text = f"{chunk.get('medicine_name', '')} {chunk.get('food_or_substance', '')} {chunk.get('evidence_excerpt', '')}"
             vector = compute_deterministic_text_vector(passage_text)
-            point_id = int(hashlib.md5(f"{chunk.get('medicine_name')}-{chunk.get('food_or_substance')}-{i}".encode()).hexdigest()[:15], 16)
-            
+            unique_str = f"{chunk.get('medicine_name')}-{chunk.get('food_or_substance')}-{chunk.get('id', i)}"
+            point_id = int(hashlib.md5(unique_str.encode()).hexdigest()[:15], 16)
+
             points.append(
                 qmodels.PointStruct(
                     id=point_id,
@@ -101,39 +113,65 @@ class QdrantEvidenceStore:
                 collection_name=COLLECTION_NAME,
                 points=points
             )
-            logger.info(f"Successfully indexed {len(points)} evidence passages into Qdrant.")
         except Exception as e:
             logger.warning(f"Error upserting into Qdrant: {str(e)}")
 
     def search_evidence(self, drug_name: str, query_text: str = "food interaction timing empty stomach milk alcohol", limit: int = 5) -> List[Dict[str, Any]]:
         """Vector similarity search over official drug evidence passages."""
-        if not self.client:
-            return []
+        clean_name = drug_name.lower().replace("tab.", "").replace("cap.", "").replace("syp.", "").strip()
 
-        search_query = f"{drug_name} {query_text}"
-        query_vector = compute_deterministic_text_vector(search_query)
+        matched = []
+        # Fallback catalog lookup in memory if Qdrant returns nothing or is uninitialized
+        from app.services.retrieval.curated_fda_catalog import get_curated_evidence_catalog
+        all_catalog = get_curated_evidence_catalog()
 
-        try:
-            # Query Qdrant with filter for matching medicine or top semantic candidates
-            results = self.client.query_points(
-                collection_name=COLLECTION_NAME,
-                query=query_vector,
-                limit=limit
-            )
-            
-            matched = []
-            for hit in results.points:
-                payload = hit.payload
-                # Check medicine match or high relevance
-                med_name = payload.get("medicine_name", "").lower()
-                if drug_name.lower() in med_name or med_name in drug_name.lower():
-                    matched.append(payload)
-                elif hit.score > 0.70:
-                    matched.append(payload)
-            return matched
-        except Exception as e:
-            logger.warning(f"Qdrant vector query failed: {str(e)}")
-            return []
+        # 1. First attempt Qdrant vector retrieval if client is available
+        if self.client:
+            search_query = f"{drug_name} {query_text}"
+            query_vector = compute_deterministic_text_vector(search_query)
+
+            try:
+                results = self.client.query_points(
+                    collection_name=COLLECTION_NAME,
+                    query=query_vector,
+                    limit=limit * 2
+                )
+
+                for hit in results.points:
+                    payload = hit.payload
+                    med_name = payload.get("medicine_name", "").lower()
+                    # Check exact or partial name match
+                    if clean_name in med_name or med_name in clean_name or any(part in med_name for part in clean_name.split() if len(part) > 3):
+                        matched.append(payload)
+                    elif hit.score > 0.85:
+                        matched.append(payload)
+            except Exception as e:
+                logger.warning(f"Qdrant vector query failed: {str(e)}")
+
+        # 2. If vector search yielded empty, do deterministic keyword & active substance matching against curated catalog
+        if not matched:
+            for item in all_catalog:
+                med_name = item.get("medicine_name", "").lower()
+                # Check match against clean_name
+                if (
+                    clean_name in med_name
+                    or med_name in clean_name
+                    or any(part in med_name for part in clean_name.split() if len(part) > 3)
+                ):
+                    matched.append(item)
+
+        # De-duplicate results by item id or (medicine_name + food_or_substance)
+        seen = set()
+        deduped = []
+        for m in matched:
+            k = f"{m.get('medicine_name')}-{m.get('food_or_substance')}"
+            if k not in seen:
+                seen.add(k)
+                deduped.append(m)
+                if len(deduped) >= limit:
+                    break
+
+        return deduped
 
 
 # Global singleton instance
