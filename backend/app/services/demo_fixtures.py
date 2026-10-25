@@ -45,7 +45,8 @@ DEMO_SCENARIOS: Dict[str, Dict[str, Any]] = {
                 "verification_status": "verified_match",
                 "uncertainty_flags": [],
                 "alternatives_json": [],
-                "reviewer_corrected": False
+                "reviewer_corrected": False,
+                "bounding_box": [288.0, 67.0, 363.0, 933.0]
             },
             {
                 "original_name": "Tab. Ibuprofen",
@@ -64,7 +65,8 @@ DEMO_SCENARIOS: Dict[str, Dict[str, Any]] = {
                 "verification_status": "verified_match",
                 "uncertainty_flags": [],
                 "alternatives_json": [],
-                "reviewer_corrected": False
+                "reviewer_corrected": False,
+                "bounding_box": [375.0, 67.0, 450.0, 933.0]
             }
         ],
         "evidences": [
@@ -150,7 +152,8 @@ DEMO_SCENARIOS: Dict[str, Dict[str, Any]] = {
                 "verification_status": "verified_match",
                 "uncertainty_flags": [],
                 "alternatives_json": [],
-                "reviewer_corrected": False
+                "reviewer_corrected": False,
+                "bounding_box": [288.0, 67.0, 363.0, 933.0]
             },
             {
                 "original_name": "Tab. Atorvastatin",
@@ -169,7 +172,8 @@ DEMO_SCENARIOS: Dict[str, Dict[str, Any]] = {
                 "verification_status": "verified_match",
                 "uncertainty_flags": [],
                 "alternatives_json": [],
-                "reviewer_corrected": False
+                "reviewer_corrected": False,
+                "bounding_box": [375.0, 67.0, 450.0, 933.0]
             },
             {
                 "original_name": "C?pr... (Unclear Handwriting)",
@@ -191,7 +195,8 @@ DEMO_SCENARIOS: Dict[str, Dict[str, Any]] = {
                     {"name": "Ciprofloxacin 250 MG Oral Tablet", "rxcui": "309309", "score": 0.72},
                     {"name": "Captopril 25 MG Oral Tablet", "rxcui": "315486", "score": 0.48}
                 ],
-                "reviewer_corrected": False
+                "reviewer_corrected": False,
+                "bounding_box": [463.0, 67.0, 538.0, 933.0]
             }
         ],
         "evidences": [

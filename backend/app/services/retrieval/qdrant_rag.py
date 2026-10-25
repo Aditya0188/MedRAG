@@ -46,8 +46,13 @@ def compute_deterministic_text_vector(text: str, dim: int = VECTOR_DIMENSION) ->
 class QdrantEvidenceStore:
     def __init__(self):
         self.client: Optional[QdrantClient] = None
+        self._is_seeded = False
         self._initialize_client()
-        self._seed_curated_catalog()
+
+    def seed_curated_catalog_sync(self):
+        if not self._is_seeded:
+            self._seed_curated_catalog()
+            self._is_seeded = True
 
     def _initialize_client(self):
         try:
@@ -118,6 +123,8 @@ class QdrantEvidenceStore:
 
     def search_evidence(self, drug_name: str, query_text: str = "food interaction timing empty stomach milk alcohol", limit: int = 5) -> List[Dict[str, Any]]:
         """Vector similarity search over official drug evidence passages."""
+        if not self._is_seeded:
+            self.seed_curated_catalog_sync()
         clean_name = drug_name.lower().replace("tab.", "").replace("cap.", "").replace("syp.", "").strip()
 
         matched = []
@@ -176,3 +183,12 @@ class QdrantEvidenceStore:
 
 # Global singleton instance
 evidence_store = QdrantEvidenceStore()
+
+
+async def preindex_curated_catalog_background():
+    """Non-blocking startup background task to pre-index common drugs into Qdrant."""
+    import asyncio
+    try:
+        await asyncio.to_thread(evidence_store.seed_curated_catalog_sync)
+    except Exception as e:
+        logger.warning(f"Background Qdrant pre-indexing error: {e}")

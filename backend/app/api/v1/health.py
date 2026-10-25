@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.db.session import get_db
 from app.schemas.schemas import SystemHealthResponse, DependencyHealthResponse, ServiceHealth
+from app.core.auth import require_doctor
+from app.models.entities import User
 
 router = APIRouter()
 
@@ -114,7 +116,7 @@ class ApiKeyUpdate(BaseModel):
 
 
 def _persist_env_key(key_name: str, value: str):
-    """Safely updates or adds a key in both active settings, os.environ, and all .env locations."""
+    """Safely updates or adds a key in active settings and all .env locations."""
     os.environ[key_name] = value
     for env_file in [".env", "backend/.env", "../.env"]:
         try:
@@ -139,8 +141,8 @@ def _persist_env_key(key_name: str, value: str):
 
 
 @router.post("/settings/key", tags=["Settings"])
-def update_gemini_api_key(data: ApiKeyUpdate):
-    """Saves or updates Gemini API key in active settings and .env files."""
+def update_gemini_api_key(data: ApiKeyUpdate, current_user: User = Depends(require_doctor)):
+    """Doctor-only: Saves or updates Gemini API key in active settings and .env files."""
     key = data.api_key.strip()
     settings.GEMINI_API_KEY = key
     _persist_env_key("GEMINI_API_KEY", key)
@@ -163,8 +165,8 @@ def get_key_status():
 
 
 @router.post("/settings/fda-key", tags=["Settings"])
-def update_openfda_api_key(data: ApiKeyUpdate):
-    """Saves or updates openFDA API key in active settings and .env files."""
+def update_openfda_api_key(data: ApiKeyUpdate, current_user: User = Depends(require_doctor)):
+    """Doctor-only: Saves or updates openFDA API key in active settings and .env files."""
     key = data.api_key.strip()
     settings.OPENFDA_API_KEY = key
     _persist_env_key("OPENFDA_API_KEY", key)

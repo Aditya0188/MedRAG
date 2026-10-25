@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import os
 import time
 from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.entities import Analysis, ExtractedMedicine, Evidence, AuditEvent
@@ -20,9 +22,18 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
-def add_audit_log(db: Session, analysis_id: str, event_type: str, actor: str = "system", details: dict = None):
+def add_audit_log(
+    db: Session,
+    analysis_id: Optional[str] = None,
+    event_type: str = "",
+    actor: str = "system",
+    details: dict = None,
+    user_id: Optional[str] = None
+):
+    target_analysis_id = analysis_id if analysis_id else "system_event"
     audit = AuditEvent(
-        analysis_id=analysis_id,
+        analysis_id=target_analysis_id,
+        user_id=user_id,
         event_type=event_type,
         actor=actor,
         timestamp=utc_now(),
@@ -31,15 +42,32 @@ def add_audit_log(db: Session, analysis_id: str, event_type: str, actor: str = "
     db.add(audit)
 
 
+async def retry_with_backoff(coro_fn, *args, max_retries: int = 2, initial_delay: float = 0.5, backoff_factor: float = 2.0, timeout_sec: float = 10.0, **kwargs):
+    """
+    Executes an async function with timeout and exponential backoff retries.
+    """
+    last_err = None
+    delay = initial_delay
+    for attempt in range(max_retries + 1):
+        try:
+            return await asyncio.wait_for(coro_fn(*args, **kwargs), timeout=timeout_sec)
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                await asyncio.sleep(delay)
+                delay *= backoff_factor
+    raise last_err
+
+
 async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
     """
-    Executes the multi-stage clinical prescription analysis pipeline on the user's uploaded document:
+    Executes the multi-stage clinical prescription analysis pipeline:
     1. Prescription uploaded (checked)
     2. Image quality checked
-    3. Handwriting analyzed (OCR baseline + Vision model)
-    4. ALL Medicine details extracted
-    5. Drug names verified (RxNorm ontology)
-    6. Official drug labels retrieved (DailyMed & openFDA)
+    3. Handwriting analyzed (OCR baseline in parallel with Vision model)
+    4. ALL Medicine details extracted with normalized bounding boxes
+    5. Drug names verified concurrently (RxNorm ontology, semaphore 5, 10s timeout, retries)
+    6. Official drug labels retrieved concurrently (DailyMed & openFDA)
     7. Evidence assembled (Qdrant RAG)
     8. Doctor review required (pending_review)
     """
@@ -83,8 +111,8 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
         analysis.stage = "handwriting_analyzed"
         db.commit()
 
-        # Run Baseline OCR (Control 1 from Methodology)
-        analysis.raw_ocr_baseline = run_baseline_ocr(analysis.stored_filepath)
+        # Launch Baseline OCR asynchronously so it never blocks Gemini Vision
+        baseline_task = asyncio.to_thread(run_baseline_ocr, analysis.stored_filepath)
 
         extracted_med_items = []
         patient_name = "Patient"
@@ -99,8 +127,10 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
             prescription_date = fixture["prescription_date"]
             analysis.raw_ai_text = fixture["raw_ai_text"]
             extracted_med_items = fixture["medicines"]
+            ocr_res = await baseline_task
+            analysis.raw_ocr_baseline = ocr_res if isinstance(ocr_res, str) else "[Tesseract OCR Baseline Unavailable]"
         else:
-            # LIVE EXTRACTION ON USER'S UPLOADED PRESCRIPTION
+            # LIVE EXTRACTION: Run Baseline OCR and Gemini Vision concurrently
             api_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
             if not api_key:
                 raise ValueError(
@@ -108,7 +138,17 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                     "Please enter your API Key in Settings or the upload panel (get a free key at https://aistudio.google.com/)."
                 )
 
-            ai_output = extract_prescription_with_gemini(analysis.stored_filepath)
+            ocr_res, ai_output = await asyncio.gather(
+                baseline_task,
+                extract_prescription_with_gemini(analysis.stored_filepath),
+                return_exceptions=True
+            )
+
+            analysis.raw_ocr_baseline = ocr_res if isinstance(ocr_res, str) else "[Tesseract OCR Baseline Unavailable]"
+
+            if isinstance(ai_output, Exception):
+                raise ai_output
+
             patient_name = ai_output.patient_name or "Patient (Prescription)"
             prescriber_name = ai_output.prescriber_name or "Attending Physician"
             prescription_date = ai_output.prescription_date or datetime.now().strftime("%Y-%m-%d")
@@ -118,6 +158,14 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                 raise ValueError("No medications could be detected on the uploaded image. Please ensure the prescription is legible and well-lit.")
 
             for med in ai_output.medicines:
+                # Validate bounding box coordinates if provided: [ymin, xmin, ymax, xmax] 0-1000 scale
+                valid_bbox = None
+                if getattr(med, "bounding_box", None) and isinstance(med.bounding_box, list) and len(med.bounding_box) == 4:
+                    try:
+                        valid_bbox = [float(coord) for coord in med.bounding_box]
+                    except (ValueError, TypeError):
+                        valid_bbox = None
+
                 extracted_med_items.append({
                     "original_name": med.original_name,
                     "normalized_name": med.possible_generic_name,
@@ -133,7 +181,8 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                     "verification_status": "no_verified_match",
                     "uncertainty_flags": med.uncertainty_flags,
                     "alternatives_json": [],
-                    "reviewer_corrected": False
+                    "reviewer_corrected": False,
+                    "bounding_box": valid_bbox
                 })
 
         analysis.patient_name_detected = patient_name
@@ -163,7 +212,8 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                 alternatives_json=item.get("alternatives_json", []),
                 normalized_name=item.get("normalized_name"),
                 rxcui=item.get("rxcui"),
-                concept_type=item.get("concept_type")
+                concept_type=item.get("concept_type"),
+                bounding_box=item.get("bounding_box")
             )
             db.add(med_obj)
             medicine_records.append(med_obj)
@@ -173,32 +223,48 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
 
         # -------------------------------------------------------------
         # STAGE 5: Drug Names Verified (RxNorm Ontological Grounding)
+        # Concurrent execution with Semaphore(5), 10s timeouts, 2 retries
         # -------------------------------------------------------------
         analysis.stage = "verification_complete"
         db.commit()
 
-        for med_rec in medicine_records:
-            try:
-                verif_res = await verify_medicine_terminology(med_rec.original_name, med_rec.strength)
-                if verif_res.normalized_name:
-                    med_rec.normalized_name = verif_res.normalized_name
-                    med_rec.rxcui = verif_res.rxcui
-                    med_rec.concept_type = verif_res.concept_type
-                    med_rec.verification_status = verif_res.verification_status
-                    med_rec.alternatives_json = [c.model_dump() for c in verif_res.candidates]
-                    if verif_res.is_regional_brand and verif_res.regional_brand_note:
-                        med_rec.uncertainty_flags = list(set(med_rec.uncertainty_flags + ["regional_brand_mapping"]))
-            except Exception as rx_err:
-                logger.warning(f"RxNorm grounding error for {med_rec.original_name}: {str(rx_err)}")
+        sem = asyncio.Semaphore(5)
 
+        async def _verify_single_med(med_rec: ExtractedMedicine):
+            async with sem:
+                try:
+                    verif_res = await retry_with_backoff(
+                        verify_medicine_terminology,
+                        med_rec.original_name,
+                        med_rec.strength,
+                        max_retries=2,
+                        timeout_sec=10.0
+                    )
+                    if verif_res.normalized_name:
+                        med_rec.normalized_name = verif_res.normalized_name
+                        med_rec.rxcui = verif_res.rxcui
+                        med_rec.concept_type = verif_res.concept_type
+                        med_rec.verification_status = verif_res.verification_status
+                        med_rec.alternatives_json = [c.model_dump() for c in verif_res.candidates]
+                        if verif_res.is_regional_brand and verif_res.regional_brand_note:
+                            med_rec.uncertainty_flags = list(set(med_rec.uncertainty_flags + ["regional_brand_mapping"]))
+                    else:
+                        med_rec.verification_status = "no_verified_match"
+                except Exception as rx_err:
+                    logger.warning(f"RxNorm grounding error for {med_rec.original_name} after retries: {rx_err}")
+                    # Drug verification failure must never fail the entire analysis pipeline
+                    med_rec.verification_status = "no_verified_match"
+                    med_rec.uncertainty_flags = list(set(med_rec.uncertainty_flags + ["not_verified"]))
+
+        await asyncio.gather(*[_verify_single_med(m) for m in medicine_records])
         db.commit()
         add_audit_log(db, analysis_id, "verification_completed")
 
         # -------------------------------------------------------------
         # STAGE 6 & 7: Official Drug Labels Retrieved & Evidence Assembled
+        # Concurrent execution with Semaphore(5), 10s timeouts, 2 retries
         # -------------------------------------------------------------
         analysis.stage = "evidence_complete"
-        # Clear previous evidences on retry
         db.query(Evidence).filter(Evidence.analysis_id == analysis_id).delete()
         db.commit()
 
@@ -223,42 +289,63 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                 db.add(ev_obj)
             db.commit()
         else:
-            # LIVE FDA DailyMed & openFDA RETRIEVAL FOR ALL EXTRACTED MEDICINES
-            for med_rec in medicine_records:
-                med_name = med_rec.normalized_name or med_rec.original_name
-                clean_lookup_name = med_name.replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").strip()
-                
-                # 1. Search Qdrant vector index (try normalized name, base ingredient, or original name)
-                clean_orig = med_rec.original_name.replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").replace("Inj.", "").strip()
-                qdrant_hits = evidence_store.search_evidence(clean_lookup_name)
-                if not qdrant_hits and clean_orig.lower() != clean_lookup_name.lower():
-                    qdrant_hits = evidence_store.search_evidence(clean_orig)
-                
-                if qdrant_hits:
-                    for hit in qdrant_hits[:2]:
-                        ev_obj = Evidence(
-                            analysis_id=analysis_id,
-                            medicine_id=med_rec.id,
-                            medicine_name=hit.get("medicine_name", clean_lookup_name),
-                            food_or_substance=hit.get("food_or_substance", "Food / Beverage Interaction"),
-                            evidence_category=hit.get("evidence_category", "timing_instruction"),
-                            source_provider=hit.get("source_provider", "DailyMed"),
-                            source_document_title=hit.get("source_document_title", "FDA Drug Labeling"),
-                            source_section=hit.get("source_section"),
-                            official_source_url=hit.get("official_source_url", "https://dailymed.nlm.nih.gov"),
-                            evidence_excerpt=hit.get("evidence_excerpt", ""),
-                            plain_language_summary=hit.get("plain_language_summary", ""),
-                            retrieval_score=0.92,
-                            retrieval_timestamp=utc_now()
+            # LIVE FDA DailyMed & openFDA RETRIEVAL FOR ALL EXTRACTED MEDICINES CONCURRENTLY
+            async def _retrieve_evidence_for_med(med_rec: ExtractedMedicine) -> List[Evidence]:
+                async with sem:
+                    ev_records = []
+                    med_name = med_rec.normalized_name or med_rec.original_name
+                    clean_lookup_name = med_name.replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").strip()
+                    clean_orig = med_rec.original_name.replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").replace("Inj.", "").strip()
+
+                    # 1. Search Qdrant vector index
+                    qdrant_hits = evidence_store.search_evidence(clean_lookup_name)
+                    if not qdrant_hits and clean_orig.lower() != clean_lookup_name.lower():
+                        qdrant_hits = evidence_store.search_evidence(clean_orig)
+
+                    if qdrant_hits:
+                        for hit in qdrant_hits[:2]:
+                            ev_records.append(Evidence(
+                                analysis_id=analysis_id,
+                                medicine_id=med_rec.id,
+                                medicine_name=hit.get("medicine_name", clean_lookup_name),
+                                food_or_substance=hit.get("food_or_substance", "Food / Beverage Interaction"),
+                                evidence_category=hit.get("evidence_category", "timing_instruction"),
+                                source_provider=hit.get("source_provider", "DailyMed"),
+                                source_document_title=hit.get("source_document_title", "FDA Drug Labeling"),
+                                source_section=hit.get("source_section"),
+                                official_source_url=hit.get("official_source_url", "https://dailymed.nlm.nih.gov"),
+                                evidence_excerpt=hit.get("evidence_excerpt", ""),
+                                plain_language_summary=hit.get("plain_language_summary", ""),
+                                retrieval_score=0.92,
+                                retrieval_timestamp=utc_now()
+                            ))
+                        return ev_records
+
+                    # 2. Live fetch from DailyMed and openFDA concurrently with retry and timeout
+                    dailymed_label = None
+                    try:
+                        dailymed_label = await retry_with_backoff(
+                            fetch_dailymed_spl,
+                            clean_lookup_name,
+                            max_retries=2,
+                            timeout_sec=10.0
                         )
-                        db.add(ev_obj)
-                else:
-                    # 2. Live fetch from DailyMed or openFDA
-                    dailymed_label = await fetch_dailymed_spl(clean_lookup_name)
-                    openfda_label = await fetch_openfda_label(clean_lookup_name)
-                    
+                    except Exception as dm_err:
+                        logger.warning(f"DailyMed fetch failed for {clean_lookup_name}: {dm_err}")
+
+                    openfda_label = None
+                    try:
+                        openfda_label = await retry_with_backoff(
+                            fetch_openfda_label,
+                            clean_lookup_name,
+                            max_retries=2,
+                            timeout_sec=10.0
+                        )
+                    except Exception as fda_err:
+                        logger.warning(f"openFDA fetch failed for {clean_lookup_name}: {fda_err}")
+
                     if dailymed_label:
-                        ev_obj = Evidence(
+                        ev_records.append(Evidence(
                             analysis_id=analysis_id,
                             medicine_id=med_rec.id,
                             medicine_name=clean_lookup_name,
@@ -272,11 +359,10 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                             plain_language_summary=f"Consult official FDA product labeling for administration and food instructions regarding {clean_lookup_name}.",
                             retrieval_score=0.90,
                             retrieval_timestamp=utc_now()
-                        )
-                        db.add(ev_obj)
+                        ))
                     elif openfda_label:
                         food_sec = openfda_label.sections.get("food_safety_warning") or openfda_label.sections.get("dosage_and_administration", "See official openFDA label.")
-                        ev_obj = Evidence(
+                        ev_records.append(Evidence(
                             analysis_id=analysis_id,
                             medicine_id=med_rec.id,
                             medicine_name=clean_lookup_name,
@@ -290,11 +376,10 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                             plain_language_summary=f"Administer {openfda_label.generic_name} according to official FDA instructions.",
                             retrieval_score=0.88,
                             retrieval_timestamp=utc_now()
-                        )
-                        db.add(ev_obj)
+                        ))
                     else:
                         # Explicit insufficient evidence category - never invent warnings!
-                        ev_obj = Evidence(
+                        ev_records.append(Evidence(
                             analysis_id=analysis_id,
                             medicine_id=med_rec.id,
                             medicine_name=clean_lookup_name,
@@ -308,8 +393,13 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
                             plain_language_summary="No verified drug label evidence available for this specific query term. Consult attending clinician or pharmacist.",
                             retrieval_score=0.0,
                             retrieval_timestamp=utc_now()
-                        )
-                        db.add(ev_obj)
+                        ))
+                    return ev_records
+
+            all_ev_lists = await asyncio.gather(*[_retrieve_evidence_for_med(m) for m in medicine_records])
+            for ev_list in all_ev_lists:
+                for ev in ev_list:
+                    db.add(ev)
             db.commit()
 
         # -------------------------------------------------------------

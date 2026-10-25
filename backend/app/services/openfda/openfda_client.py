@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Any, Optional, List
 import httpx
 from app.core.config import settings
+from app.services.api_cache import get_cached_api_response, set_cached_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,24 @@ async def fetch_openfda_label(drug_name: str) -> Optional[OpenFDALabelResult]:
     Extracts food interactions, drug interactions, boxed warnings, and patient instructions.
     Uses OPENFDA_API_KEY if configured to elevate rate limits to 240 requests/minute.
     """
-    clean_name = drug_name.split()[0].replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").strip()
-    if not clean_name or len(clean_name) < 2:
+    norm_key = drug_name.split()[0].replace("Tab.", "").replace("Cap.", "").replace("Syp.", "").strip().lower()
+    if not norm_key or len(norm_key) < 2:
         return None
+
+    cached = get_cached_api_response("openfda", norm_key)
+    if cached:
+        return OpenFDALabelResult(
+            brand_name=cached.get("brand_name", norm_key),
+            generic_name=cached.get("generic_name", norm_key),
+            spl_id=cached.get("spl_id", ""),
+            sections=cached.get("sections", {}),
+            source_url=cached.get("source_url", ""),
+            dosage_forms=cached.get("dosage_forms", []),
+            substance_names=cached.get("substance_names", []),
+            boxed_warning=cached.get("boxed_warning")
+        )
+
+    clean_name = norm_key
 
     # Try searching generic name first, then brand name, then substance name
     queries = [
@@ -89,7 +105,7 @@ async def fetch_openfda_label(drug_name: str) -> Optional[OpenFDALabelResult]:
                             if spl_id else "https://open.fda.gov/apis/drug/label/"
                         )
 
-                        return OpenFDALabelResult(
+                        res = OpenFDALabelResult(
                             brand_name=brand_names[0] if brand_names else clean_name,
                             generic_name=generic_names[0] if generic_names else clean_name,
                             spl_id=spl_id,
@@ -99,6 +115,17 @@ async def fetch_openfda_label(drug_name: str) -> Optional[OpenFDALabelResult]:
                             substance_names=substance_names,
                             boxed_warning=boxed_warning
                         )
+                        set_cached_api_response("openfda", norm_key, {
+                            "brand_name": res.brand_name,
+                            "generic_name": res.generic_name,
+                            "spl_id": res.spl_id,
+                            "sections": res.sections,
+                            "source_url": res.source_url,
+                            "dosage_forms": res.dosage_forms,
+                            "substance_names": res.substance_names,
+                            "boxed_warning": res.boxed_warning
+                        }, ttl_days=7)
+                        return res
         except Exception as e:
             logger.warning(f"openFDA query failed for query {q}: {str(e)}")
             continue

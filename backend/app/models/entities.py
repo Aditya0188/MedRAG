@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import uuid
 from sqlalchemy import (
-    Column, String, Boolean, Float, DateTime, ForeignKey, Text, JSON
+    Column, String, Boolean, Float, DateTime, ForeignKey, Text, JSON, Integer
 )
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -15,10 +15,42 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid, index=True)
+    name = Column(String(255), nullable=False)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(32), nullable=False)  # "patient" or "doctor"
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    # Relationships
+    patient_profile = relationship("PatientProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    analyses = relationship("Analysis", back_populates="patient", foreign_keys="Analysis.patient_id")
+    audit_events = relationship("AuditEvent", back_populates="user")
+
+
+class PatientProfile(Base):
+    __tablename__ = "patient_profiles"
+
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+    age = Column(Integer, nullable=True)
+    sex = Column(String(32), nullable=True)
+    allergies = Column(JSON, default=list, nullable=False)  # List of strings e.g. ["Penicillin", "Sulfa drugs"]
+    conditions = Column(JSON, default=list, nullable=False)  # List of strings e.g. ["Hypertension", "Type 2 Diabetes"]
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    user = relationship("User", back_populates="patient_profile")
+
+
 class Analysis(Base):
     __tablename__ = "analyses"
 
     id = Column(String(36), primary_key=True, default=generate_uuid, index=True)
+    patient_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    reviewed_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     original_filename = Column(String(255), nullable=False)
     stored_filepath = Column(String(512), nullable=False)
     file_checksum = Column(String(64), nullable=False, index=True)
@@ -48,8 +80,12 @@ class Analysis(Base):
     
     # Doctor Review Status
     review_status = Column(String(32), default="unreviewed", nullable=False)  # unreviewed, pending_review, approved, rejected, correction_requested
+    rejection_reason = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
+    patient = relationship("User", back_populates="analyses", foreign_keys=[patient_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
     medicines = relationship("ExtractedMedicine", back_populates="analysis", cascade="all, delete-orphan", order_by="ExtractedMedicine.id")
     evidences = relationship("Evidence", back_populates="analysis", cascade="all, delete-orphan", order_by="Evidence.retrieval_timestamp")
     reviews = relationship("Review", back_populates="analysis", cascade="all, delete-orphan", order_by="Review.decided_at.desc()")
@@ -88,6 +124,9 @@ class ExtractedMedicine(Base):
     # Clinician Review
     reviewer_corrected = Column(Boolean, default=False)
     reviewer_notes = Column(Text, nullable=True)
+
+    # Bounding Box (Phase 2 Normalized [ymin, xmin, ymax, xmax] 0-1000 scale)
+    bounding_box = Column(JSON, nullable=True)
 
     # Relationships
     analysis = relationship("Analysis", back_populates="medicines")
@@ -149,7 +188,8 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id = Column(String(36), primary_key=True, default=generate_uuid, index=True)
-    analysis_id = Column(String(36), ForeignKey("analyses.id", ondelete="CASCADE"), nullable=False, index=True)
+    analysis_id = Column(String(36), ForeignKey("analyses.id", ondelete="CASCADE"), nullable=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     event_type = Column(String(64), nullable=False)
     actor = Column(String(100), default="system", nullable=False)
     timestamp = Column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -157,3 +197,16 @@ class AuditEvent(Base):
 
     # Relationships
     analysis = relationship("Analysis", back_populates="audit_events")
+    user = relationship("User", back_populates="audit_events")
+
+
+class ApiCache(Base):
+    __tablename__ = "api_cache"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid, index=True)
+    cache_key = Column(String(255), unique=True, index=True, nullable=False)
+    service = Column(String(50), index=True, nullable=False)  # 'rxnorm', 'dailymed', 'openfda'
+    response_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+

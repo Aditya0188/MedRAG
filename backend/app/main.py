@@ -4,9 +4,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.config import settings
-from app.db.session import engine, Base
+from app.db.session import engine, Base, run_sqlite_migrations
+import asyncio
 from app.services.demo_fixtures import seed_sample_prescriptions
-from app.api.v1 import analyses, medicines, evidence, review, metrics, health, demo
+from app.services.retrieval.qdrant_rag import preindex_curated_catalog_background
+from app.api.v1 import auth, patients, analyses, medicines, evidence, review, metrics, health, demo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,13 +19,17 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Ensure database tables are created
-    logger.info("Initializing SQLite database models...")
+    # Startup: Ensure database tables are created & schema migrations applied
+    logger.info("Initializing SQLite database models and running safe migrations...")
     Base.metadata.create_all(bind=engine)
+    run_sqlite_migrations(engine)
     
     # Pre-render sample synthetic prescriptions for demo mode
     logger.info("Seeding academic sample demo prescriptions...")
     seed_sample_prescriptions()
+    
+    # Pre-index common drugs' labels into Qdrant in non-blocking background task
+    asyncio.create_task(preindex_curated_catalog_background())
     
     yield
     logger.info("Application shutting down.")
@@ -49,26 +55,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Safe Global Exception Handler
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled error on {request.method} {request.url.path}: {str(exc)}", exc_info=True)
-    # Never expose stack traces or raw sensitive errors to client
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "An internal server error occurred while processing the medical document request."}
-    )
-
-# Include Routers under API_V1_PREFIX
-app.include_router(health.router, prefix=settings.API_V1_PREFIX)
-app.include_router(health.router)  # Also expose /health at root
-app.include_router(analyses.router, prefix=settings.API_V1_PREFIX)
-app.include_router(medicines.router, prefix=settings.API_V1_PREFIX)
-app.include_router(evidence.router, prefix=settings.API_V1_PREFIX)
-app.include_router(review.router, prefix=settings.API_V1_PREFIX)
-app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
-app.include_router(demo.router, prefix=settings.API_V1_PREFIX)
-
 
 @app.get("/")
 def root():
@@ -78,3 +64,16 @@ def root():
         "docs_url": "/docs",
         "health_url": f"{settings.API_V1_PREFIX}/health"
     }
+
+
+# Include Routers under API_V1_PREFIX
+app.include_router(health.router, prefix=settings.API_V1_PREFIX)
+app.include_router(health.router)  # Also expose /health at root
+app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
+app.include_router(patients.router, prefix=settings.API_V1_PREFIX)
+app.include_router(analyses.router, prefix=settings.API_V1_PREFIX)
+app.include_router(medicines.router, prefix=settings.API_V1_PREFIX)
+app.include_router(evidence.router, prefix=settings.API_V1_PREFIX)
+app.include_router(review.router, prefix=settings.API_V1_PREFIX)
+app.include_router(metrics.router, prefix=settings.API_V1_PREFIX)
+app.include_router(demo.router, prefix=settings.API_V1_PREFIX)

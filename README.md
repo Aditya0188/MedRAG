@@ -114,7 +114,7 @@ Configure your Gemini API key in `.env`:
 ```env
 APP_MODE=live
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
 > **Tip:** You can also enter and activate your Gemini API key directly from within the web interface at **Settings (`/settings`)** or when uploading a prescription on **New Analysis (`/new-analysis`)**. The key is securely saved to your local `.env` and activated immediately without restarting the server.

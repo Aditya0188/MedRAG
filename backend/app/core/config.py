@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     
     # Database
     DATABASE_URL: str = "sqlite:///./data/meddrag.db"
+
+    # JWT Authentication
+    JWT_SECRET: str = "meddrag-secret-key-change-in-production-2026"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     
     # Vector Search
     QDRANT_URL: str = ""

@@ -4,6 +4,65 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 # -------------------------------------------------------------
+# Auth & User Schemas
+# -------------------------------------------------------------
+class PatientProfileBase(BaseModel):
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    allergies: List[str] = Field(default_factory=list)
+    conditions: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class PatientProfileUpdate(BaseModel):
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    allergies: Optional[List[str]] = None
+    conditions: Optional[List[str]] = None
+    notes: Optional[str] = None
+
+
+class PatientProfileResponse(PatientProfileBase):
+    user_id: str
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: str  # "patient" or "doctor"
+    created_at: datetime
+    patient_profile: Optional[PatientProfileResponse] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PatientListItemResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    role: str
+    created_at: datetime
+    age: Optional[int] = None
+    sex: Optional[str] = None
+    allergies: List[str] = Field(default_factory=list)
+    conditions: List[str] = Field(default_factory=list)
+    prescriptions_count: int = 0
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    message: str
+    user: UserResponse
+    token: str
+
+
+# -------------------------------------------------------------
 # Medicine Schemas
 # -------------------------------------------------------------
 class ExtractedMedicineBase(BaseModel):
@@ -25,6 +84,7 @@ class ExtractedMedicineBase(BaseModel):
     alternatives_json: List[Dict[str, Any]] = Field(default_factory=list)
     reviewer_corrected: bool = False
     reviewer_notes: Optional[str] = None
+    bounding_box: Optional[List[float]] = None
 
 
 class ExtractedMedicineUpdate(BaseModel):
@@ -41,6 +101,7 @@ class ExtractedMedicineUpdate(BaseModel):
     food_instructions: Optional[str] = None
     verification_status: Optional[str] = None
     reviewer_notes: Optional[str] = None
+    bounding_box: Optional[List[float]] = None
 
 
 class ExtractedMedicineResponse(ExtractedMedicineBase):
@@ -78,7 +139,7 @@ class EvidenceResponse(EvidenceBase):
 # Review & Audit Schemas
 # -------------------------------------------------------------
 class ReviewCreate(BaseModel):
-    reviewer_name: str = "Dr. Anju Chandna (Simulated Clinician Reviewer)"
+    reviewer_name: str = "Dr. Clinician Reviewer"
     reviewer_role: str = "Attending Clinician / Reviewer"
     review_notes: Optional[str] = None
     corrections_made: Dict[str, Any] = Field(default_factory=dict)
@@ -99,7 +160,7 @@ class ReviewResponse(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    reviewer_name: str = "Dr. Anju Chandna (Simulated Clinician Reviewer)"
+    reviewer_name: str = "Dr. Clinician Reviewer"
     reviewer_role: str = "Attending Clinician / Reviewer"
     review_notes: Optional[str] = "Prescription verified and approved for patient summary."
     confirmed_no_unresolved_critical_fields: bool = True
@@ -107,7 +168,7 @@ class ApprovalRequest(BaseModel):
 
 
 class RejectRequest(BaseModel):
-    reviewer_name: str = "Dr. Anju Chandna (Simulated Clinician Reviewer)"
+    reviewer_name: str = "Dr. Clinician Reviewer"
     reviewer_role: str = "Attending Clinician / Reviewer"
     rejection_reason: str
     review_duration_seconds: float = 0.0
@@ -115,7 +176,8 @@ class RejectRequest(BaseModel):
 
 class AuditEventResponse(BaseModel):
     id: str
-    analysis_id: str
+    analysis_id: Optional[str] = None
+    user_id: Optional[str] = None
     event_type: str
     actor: str
     timestamp: datetime
@@ -128,6 +190,8 @@ class AuditEventResponse(BaseModel):
 # -------------------------------------------------------------
 class AnalysisListItem(BaseModel):
     id: str
+    patient_id: Optional[str] = None
+    patient_name: Optional[str] = None
     original_filename: str
     created_at: datetime
     stage: str
@@ -141,6 +205,8 @@ class AnalysisListItem(BaseModel):
 
 class AnalysisResponse(BaseModel):
     id: str
+    patient_id: Optional[str] = None
+    reviewed_by: Optional[str] = None
     original_filename: str
     stored_filepath: str
     file_checksum: str
@@ -160,6 +226,8 @@ class AnalysisResponse(BaseModel):
     raw_ocr_baseline: Optional[str] = None
     raw_ai_text: Optional[str] = None
     review_status: str
+    rejection_reason: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
     medicines: List[ExtractedMedicineResponse] = Field(default_factory=list)
     evidences: List[EvidenceResponse] = Field(default_factory=list)
     reviews: List[ReviewResponse] = Field(default_factory=list)
@@ -194,7 +262,7 @@ class PatientScheduleItem(BaseModel):
 class PatientFoodWarningItem(BaseModel):
     medicine_name: str
     food_or_substance: str
-    warning_level: str  # AVOID, LIMIT, TIMING, SAFE
+    warning_level: str  # AVOID, LIMIT, TIMING, SAFE, UNKNOWN
     advice: str
     source_title: str
     official_source_url: str

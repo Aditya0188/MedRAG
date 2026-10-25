@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
 from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Analysis, ExtractedMedicine, Evidence, Review
+from app.models.entities import Analysis, ExtractedMedicine, Evidence, Review, User
 from app.schemas.schemas import (
     ReviewCreate, ReviewResponse, ApprovalRequest, RejectRequest,
     PatientSummaryResponse, PatientScheduleItem, PatientFoodWarningItem
 )
+from app.core.auth import require_doctor, require_user
 from app.services.pipeline_orchestrator import add_audit_log
 
 router = APIRouter()
@@ -21,6 +22,7 @@ def utc_now():
 def save_review_draft(
     analysis_id: str,
     review_data: ReviewCreate,
+    current_user: User = Depends(require_doctor),
     db: Session = Depends(get_db)
 ):
     """Saves doctor review notes, annotations, and corrections without final sign-off."""
@@ -28,9 +30,10 @@ def save_review_draft(
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found.")
 
+    reviewer_name = review_data.reviewer_name or current_user.name
     review = Review(
         analysis_id=analysis_id,
-        reviewer_name=review_data.reviewer_name,
+        reviewer_name=reviewer_name,
         reviewer_role=review_data.reviewer_role,
         decision="in_review",
         review_notes=review_data.review_notes,
@@ -43,9 +46,12 @@ def save_review_draft(
     db.refresh(review)
 
     add_audit_log(
-        db, analysis_id, "review_draft_saved",
-        actor=review_data.reviewer_name,
-        details={"notes": review_data.review_notes}
+        db,
+        analysis_id=analysis_id,
+        event_type="review_draft_saved",
+        actor=current_user.name,
+        details={"notes": review_data.review_notes},
+        user_id=current_user.id
     )
     db.commit()
 
@@ -56,10 +62,11 @@ def save_review_draft(
 def approve_analysis(
     analysis_id: str,
     approval: ApprovalRequest,
+    current_user: User = Depends(require_doctor),
     db: Session = Depends(get_db)
 ):
     """
-    Clinician Gateway Approval:
+    Clinician Gateway Approval (Doctor Only):
     Validates that all critical ambiguous fields have been reviewed or resolved.
     Transitions analysis state to 'approved', enabling generation of patient summary.
     """
@@ -82,10 +89,10 @@ def approve_analysis(
                 )
             )
 
-    # Record Review Record
+    reviewer_name = approval.reviewer_name or current_user.name
     review = Review(
         analysis_id=analysis_id,
-        reviewer_name=approval.reviewer_name,
+        reviewer_name=reviewer_name,
         reviewer_role=approval.reviewer_role,
         decision="approved",
         review_notes=approval.review_notes,
@@ -98,13 +105,18 @@ def approve_analysis(
     # Update Analysis state
     analysis.review_status = "approved"
     analysis.stage = "approved"
+    analysis.reviewed_by = current_user.id
+    analysis.reviewed_at = utc_now()
     db.commit()
     db.refresh(review)
 
     add_audit_log(
-        db, analysis_id, "doctor_approved",
-        actor=approval.reviewer_name,
-        details={"review_notes": approval.review_notes, "duration_sec": approval.review_duration_seconds}
+        db,
+        analysis_id=analysis_id,
+        event_type="approve",
+        actor=current_user.name,
+        details={"review_notes": approval.review_notes, "duration_sec": approval.review_duration_seconds},
+        user_id=current_user.id
     )
     db.commit()
 
@@ -115,16 +127,18 @@ def approve_analysis(
 def reject_analysis(
     analysis_id: str,
     reject: RejectRequest,
+    current_user: User = Depends(require_doctor),
     db: Session = Depends(get_db)
 ):
-    """Doctor rejects the prescription report with reason."""
+    """Doctor-only rejection with mandatory reason."""
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found.")
 
+    reviewer_name = reject.reviewer_name or current_user.name
     review = Review(
         analysis_id=analysis_id,
-        reviewer_name=reject.reviewer_name,
+        reviewer_name=reviewer_name,
         reviewer_role=reject.reviewer_role,
         decision="rejected",
         review_notes=reject.rejection_reason,
@@ -136,13 +150,19 @@ def reject_analysis(
 
     analysis.review_status = "rejected"
     analysis.stage = "rejected"
+    analysis.rejection_reason = reject.rejection_reason
+    analysis.reviewed_by = current_user.id
+    analysis.reviewed_at = utc_now()
     db.commit()
     db.refresh(review)
 
     add_audit_log(
-        db, analysis_id, "doctor_rejected",
-        actor=reject.reviewer_name,
-        details={"reason": reject.rejection_reason}
+        db,
+        analysis_id=analysis_id,
+        event_type="reject",
+        actor=current_user.name,
+        details={"reason": reject.rejection_reason},
+        user_id=current_user.id
     )
     db.commit()
 
@@ -150,12 +170,17 @@ def reject_analysis(
 
 
 @router.get("/analyses/{analysis_id}/patient-summary", response_model=PatientSummaryResponse, tags=["Patient Summary"])
-def get_patient_summary(analysis_id: str, db: Session = Depends(get_db)):
+def get_patient_summary(
+    analysis_id: str,
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
     """
     STRICT ACCESS CONTROL:
     Generates and returns the simplified patient summary ONLY if the analysis
     has been explicitly reviewed and approved by a clinician.
-    Returns 403 Forbidden for pending or rejected analyses.
+    Returns 403 Forbidden for pending, unreviewed, or rejected analyses.
+    Patients can only view the summary of their own approved analyses (403 otherwise).
     """
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
@@ -163,8 +188,14 @@ def get_patient_summary(analysis_id: str, db: Session = Depends(get_db)):
 
     if analysis.review_status != "approved":
         raise HTTPException(
-            status_code=403,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied: Patient summary is strictly unavailable until verified and approved by a clinician."
+        )
+
+    if current_user.role == "patient" and analysis.patient_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: You may only access your own verified prescription summary."
         )
 
     # Get latest approval review
@@ -173,14 +204,15 @@ def get_patient_summary(analysis_id: str, db: Session = Depends(get_db)):
         Review.decision == "approved"
     ).order_by(Review.decided_at.desc()).first()
 
-    reviewer_name = latest_approval.reviewer_name if latest_approval else "Attending Clinician"
+    reviewer_name = latest_approval.reviewer_name if latest_approval else (
+        analysis.reviewer.name if analysis.reviewer else "Attending Clinician"
+    )
     reviewer_role = latest_approval.reviewer_role if latest_approval else "Clinician Reviewer"
-    approval_date = latest_approval.decided_at if latest_approval else utc_now()
+    approval_date = analysis.reviewed_at or (latest_approval.decided_at if latest_approval else utc_now())
 
     # Build Patient Schedule Items
     schedule_items: List[PatientScheduleItem] = []
     for med in analysis.medicines:
-        # Standardize timing phrase
         timing_display = med.frequency_meaning or med.frequency or "As directed by physician"
         if med.timing_instructions:
             timing_display += f" ({med.timing_instructions})"
@@ -222,9 +254,11 @@ def get_patient_summary(analysis_id: str, db: Session = Depends(get_db)):
             )
         )
 
+    patient_display_name = analysis.patient.name if analysis.patient else (analysis.patient_name_detected or "Patient")
+
     return PatientSummaryResponse(
         analysis_id=analysis_id,
-        patient_name=analysis.patient_name_detected or "Patient",
+        patient_name=patient_display_name,
         prescriber_name=analysis.prescriber_name_detected or "Consultant Physician",
         prescription_date=analysis.prescription_date_detected,
         approval_date=approval_date,

@@ -1,9 +1,10 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import Analysis, ExtractedMedicine
+from app.models.entities import Analysis, ExtractedMedicine, User
 from app.schemas.schemas import ExtractedMedicineResponse, ExtractedMedicineUpdate
+from app.core.auth import require_doctor, require_user
 from app.services.rxnorm.rxnorm_client import verify_medicine_terminology
 from app.services.pipeline_orchestrator import add_audit_log
 
@@ -11,11 +12,29 @@ router = APIRouter()
 
 
 @router.get("/analyses/{analysis_id}/medicines", response_model=List[ExtractedMedicineResponse], tags=["Medicines"])
-def get_medicines(analysis_id: str, db: Session = Depends(get_db)):
-    """Retrieve all extracted medicine items for an analysis."""
+def get_medicines(
+    analysis_id: str,
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve extracted medicine items for an analysis.
+    Patients can only view medicines for their own approved analyses.
+    Doctors can view medicines for any analysis.
+    """
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found.")
+
+    if current_user.role == "patient":
+        if analysis.patient_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+        if analysis.review_status != "approved":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Medicine details are not available to patients prior to clinician verification and approval."
+            )
+
     return analysis.medicines
 
 
@@ -24,10 +43,11 @@ def update_medicine(
     analysis_id: str,
     medicine_id: str,
     update_data: ExtractedMedicineUpdate,
+    current_user: User = Depends(require_doctor),
     db: Session = Depends(get_db)
 ):
     """
-    Row-level editing control for authorized clinicians to correct extracted medicine details.
+    Doctor-only row-level editing control to correct extracted medicine details.
     Persists changes, sets reviewer_corrected=True, and logs audit event.
     """
     med = db.query(ExtractedMedicine).filter(
@@ -56,9 +76,12 @@ def update_medicine(
     db.refresh(med)
 
     add_audit_log(
-        db, analysis_id, "medicine_corrected_by_doctor",
-        actor="clinician_reviewer",
-        details={"medicine_id": medicine_id, "updated_fields": list(patch_dict.keys())}
+        db,
+        analysis_id=analysis_id,
+        event_type="edit",
+        actor=current_user.name,
+        details={"medicine_id": medicine_id, "updated_fields": list(patch_dict.keys())},
+        user_id=current_user.id
     )
     db.commit()
 
@@ -66,8 +89,12 @@ def update_medicine(
 
 
 @router.post("/analyses/{analysis_id}/verify-medicines", response_model=List[ExtractedMedicineResponse], tags=["Medicines"])
-async def reverify_medicines(analysis_id: str, db: Session = Depends(get_db)):
-    """Re-runs RxNorm terminology verification on all medicines in this analysis."""
+async def reverify_medicines(
+    analysis_id: str,
+    current_user: User = Depends(require_doctor),
+    db: Session = Depends(get_db)
+):
+    """Doctor-only endpoint: re-runs RxNorm terminology verification on all medicines in this analysis."""
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found.")
@@ -83,7 +110,7 @@ async def reverify_medicines(analysis_id: str, db: Session = Depends(get_db)):
             med.alternatives_json = [c.model_dump() for c in res.candidates]
 
     db.commit()
-    add_audit_log(db, analysis_id, "medicines_reverified", actor="clinician_reviewer")
+    add_audit_log(db, analysis_id=analysis_id, event_type="medicines_reverified", actor=current_user.name, user_id=current_user.id)
     db.commit()
 
     return analysis.medicines

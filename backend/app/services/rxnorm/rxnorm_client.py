@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Optional
 import httpx
 from pydantic import BaseModel
 from app.core.config import settings
+from app.services.api_cache import get_cached_api_response, set_cached_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -214,10 +215,18 @@ async def verify_medicine_terminology(drug_name: str, strength: Optional[str] = 
             regional_brand_note="Ambiguous or unreadable handwriting requiring clinician verification."
         )
 
-    # Check cache first
+    # Check cache first (in-memory then persistent SQLite)
     cache_key = f"{clean_lower}|{strength or ''}"
     if cache_key in _RXNORM_CACHE:
         return _RXNORM_CACHE[cache_key]
+    persisted = get_cached_api_response("rxnorm", cache_key)
+    if persisted:
+        try:
+            res = RxNormVerificationResult(**persisted)
+            _RXNORM_CACHE[cache_key] = res
+            return res
+        except Exception:
+            pass
 
     # 1. Match against Regional Indian Brand Formulary
     for brand, mapping in INDIAN_BRAND_MAP.items():
@@ -240,6 +249,7 @@ async def verify_medicine_terminology(drug_name: str, strength: Optional[str] = 
                 regional_brand_note=f"Matched regional trade brand '{raw_cleaned}' to official international formulation: {mapping['generic']} (Active: {mapping['ingredient']})."
             )
             _RXNORM_CACHE[cache_key] = result
+            set_cached_api_response("rxnorm", cache_key, result.model_dump(), ttl_days=7)
             return result
 
     # 2. Query Live RxNorm API
@@ -313,4 +323,5 @@ async def verify_medicine_terminology(drug_name: str, strength: Optional[str] = 
         )
 
     _RXNORM_CACHE[cache_key] = result
+    set_cached_api_response("rxnorm", cache_key, result.model_dump(), ttl_days=7)
     return result
