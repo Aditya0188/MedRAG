@@ -121,17 +121,10 @@ MedDRAG features a full self-service account creation workflow alongside role-ba
   - **Patient Registration:** Full name, email, password, and optional initial health profile (Age, Biological Sex, Drug Allergies, Pre-existing Chronic Conditions).
   - **Clinician Registration:** Full name (e.g. Dr. Jane Smith, MD), institutional email, and secure credentials.
   - Generates signed JWT session cookies (`meddrag_token`) and redirects automatically to the role's designated workspace (`/patient` or `/doctor`).
-- **Seeded Evaluation Accounts (Optional):**
-  If desired for academic or testing purposes, synthetic accounts can be seeded at any time using:
-  ```powershell
-  python -m app.seed
-  ```
-  | Role | Name | Email | Password | Clinical Context / Profile |
-  | :--- | :--- | :--- | :--- | :--- |
-  | **Doctor** | Dr. Sarah Chen, MD | `dr.chen@meddrag.hospital` | `DemoPassword123!` | Attending Clinician / Reviewer |
-  | **Doctor** | Dr. Rajesh Sharma, MD | `dr.sharma@meddrag.hospital` | `DemoPassword123!` | Lead Clinical Pharmacologist |
-  | **Patient** | John Miller | `john.miller@example.com` | `DemoPassword123!` | Age 52, Allergies: Penicillin, Conditions: Hypertension |
-  | **Patient** | Priya Patel | `priya.patel@example.com` | `DemoPassword123!` | Age 34, Allergies: Amoxicillin, Conditions: Asthma |
+- **Role Isolation & Access Control:**
+  - **Patient Role:** Upload original prescriptions, inspect real-time vertical pipeline progress, view approved patient medication guides, and manage medical history and allergies. Unapproved analyses and internal raw AI logs are strictly blocked (403).
+  - **Doctor Role:** Clinical review workspace with dual-column canvas, image pan/zoom and bounding-box overlay, medication dosage verification, evidence drawer, patient directory, and approval/rejection triage.
+  - **Zero Default Dummy Data:** Clean database out-of-the-box ready for your real prescription uploads and patient accounts.
 
 ---
 
@@ -181,8 +174,7 @@ python -m venv backend\venv
 # Install dependencies
 pip install -r backend\requirements.txt
 
-# Run database migrations and seed demo accounts
-python -m app.seed
+# Database tables and migrations initialize automatically upon backend startup
 ```
 
 ### Step 3: Frontend Setup
@@ -310,7 +302,7 @@ meddraggg/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                  # FastAPI application entrypoint & lifespan pre-indexing
-│   │   ├── seed.py                  # Idempotent seed script (2 doctors, 4 patients)
+│   │   ├── seed.py                  # Optional seed script for synthetic test fixtures
 │   │   ├── core/
 │   │   │   ├── auth.py              # JWT authentication & require_doctor/patient RBAC
 │   │   │   └── config.py            # Pydantic settings & gemini-3.1-flash-lite config
@@ -333,7 +325,7 @@ meddraggg/
 │   ├── app/
 │   │   ├── layout.tsx               # Root layout with QueryProvider, AuthProvider, ToastProvider
 │   │   ├── page.tsx                 # Root landing page with role-aware redirection
-│   │   ├── login/page.tsx           # Login page with one-click demo credentials
+│   │   ├── login/page.tsx           # Authentication page with Sign In and Create Account
 │   │   ├── patient/
 │   │   │   ├── page.tsx             # Patient prescription upload card & live SSE stepper
 │   │   │   ├── history/page.tsx     # Patient prescription history list
