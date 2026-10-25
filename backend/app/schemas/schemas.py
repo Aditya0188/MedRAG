@@ -56,6 +56,18 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    email: str = Field(..., min_length=5, max_length=255)
+    password: str = Field(..., min_length=6, max_length=128)
+    role: str = Field("patient", pattern="^(patient|doctor)$")
+    age: Optional[int] = Field(None, ge=0, le=130)
+    sex: Optional[str] = Field(None, max_length=32)
+    allergies: List[str] = Field(default_factory=list)
+    conditions: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
 class LoginResponse(BaseModel):
     message: str
     user: UserResponse
@@ -170,7 +182,7 @@ class ApprovalRequest(BaseModel):
 class RejectRequest(BaseModel):
     reviewer_name: str = "Dr. Clinician Reviewer"
     reviewer_role: str = "Attending Clinician / Reviewer"
-    rejection_reason: str
+    rejection_reason: str = Field(..., min_length=10, description="Detailed reason for clinical rejection (minimum 10 characters)")
     review_duration_seconds: float = 0.0
 
 

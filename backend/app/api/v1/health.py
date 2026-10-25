@@ -8,7 +8,8 @@ from pydantic import BaseModel
 from app.core.config import settings
 from app.db.session import get_db
 from app.schemas.schemas import SystemHealthResponse, DependencyHealthResponse, ServiceHealth
-from app.core.auth import require_doctor
+from app.core.auth import require_doctor, require_user, get_optional_current_user
+from typing import Optional
 from app.models.entities import User
 
 router = APIRouter()
@@ -115,9 +116,37 @@ class ApiKeyUpdate(BaseModel):
     api_key: str
 
 
+class DeveloperKeyPayload(BaseModel):
+    api_key: str
+    validate_key: bool = False
+
+
+def validate_gemini_key(api_key: str) -> tuple[bool, str]:
+    """Validates the Gemini API key against Google GenAI client."""
+    if not api_key:
+        return False, "API key cannot be empty."
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        # Fast query for model metadata to verify key authentication
+        target_model = settings.GEMINI_MODEL or "gemini-2.0-flash"
+        client.models.get(model=target_model)
+        return True, f"Key verified and authenticated with Google GenAI ({target_model})."
+    except Exception as e:
+        err_str = str(e)
+        if "API_KEY_INVALID" in err_str or "API key not valid" in err_str:
+            return False, "Google GenAI rejected this key: API key is not valid."
+        if "PERMISSION_DENIED" in err_str:
+            return False, "Google GenAI error: Permission denied for this API key."
+        return False, f"Key validation check returned: {err_str[:120]}"
+
+
 def _persist_env_key(key_name: str, value: str):
     """Safely updates or adds a key in active settings and all .env locations."""
     os.environ[key_name] = value
+    # Guard: do not overwrite developer's real .env files with dummy test strings during pytest runs
+    if os.environ.get("DATABASE_URL", "").startswith("sqlite:///./data/test_"):
+        return
     for env_file in [".env", "backend/.env", "../.env"]:
         try:
             existing_lines = []
@@ -186,3 +215,109 @@ def get_fda_key_status():
         "has_key": has_key,
         "rate_limit": "240 requests/min (Authenticated)" if has_key else "40 requests/min (Public tier)"
     }
+
+
+# =========================================================================
+# DEVELOPER SETTINGS ENDPOINTS (Accessible to all authenticated/prototype users)
+# =========================================================================
+
+@router.post("/developer/key", tags=["Developer Settings"])
+def update_developer_gemini_key(
+    data: DeveloperKeyPayload,
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    """
+    Developer Settings: Saves or updates Gemini API key in active settings and .env files.
+    Accessible to all users in development/prototype mode to configure AI vision.
+    """
+    key = data.api_key.strip()
+    is_valid = True
+    val_msg = "Key saved successfully."
+    if key and data.validate_key:
+        is_valid, val_msg = validate_gemini_key(key)
+
+    settings.GEMINI_API_KEY = key
+    _persist_env_key("GEMINI_API_KEY", key)
+
+    return {
+        "status": "success" if is_valid else "warning",
+        "message": f"Gemini API Key successfully updated. {val_msg}",
+        "has_key": bool(key),
+        "is_valid": is_valid,
+        "model": settings.GEMINI_MODEL
+    }
+
+
+@router.post("/developer/key/validate", tags=["Developer Settings"])
+def test_gemini_key(
+    data: DeveloperKeyPayload,
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    """Developer Settings: Tests whether the provided or active Gemini key is valid."""
+    key = data.api_key.strip() if data.api_key else (settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", ""))
+    is_valid, val_msg = validate_gemini_key(key)
+    return {
+        "is_valid": is_valid,
+        "message": val_msg,
+        "model": settings.GEMINI_MODEL
+    }
+
+
+@router.post("/developer/fda-key", tags=["Developer Settings"])
+def update_developer_fda_key(
+    data: ApiKeyUpdate,
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    """Developer Settings: Updates openFDA API key in active settings and .env files."""
+    key = data.api_key.strip()
+    settings.OPENFDA_API_KEY = key
+    _persist_env_key("OPENFDA_API_KEY", key)
+    return {
+        "status": "success",
+        "message": "openFDA API Key successfully updated.",
+        "has_key": bool(key),
+        "rate_limit": "240 requests/min (Authenticated)" if key else "40 requests/min (Public tier)"
+    }
+
+
+@router.get("/developer/status", tags=["Developer Settings"])
+def get_developer_status():
+    """Developer Settings: Returns comprehensive system and key status."""
+    has_gemini = bool(settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", ""))
+    has_fda = bool(settings.OPENFDA_API_KEY or os.environ.get("OPENFDA_API_KEY", ""))
+    masked_key = ""
+    active_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
+    if active_key:
+        if len(active_key) > 8:
+            masked_key = active_key[:4] + "••••••••" + active_key[-4:]
+        else:
+            masked_key = "••••••••"
+
+    return {
+        "has_gemini_key": has_gemini,
+        "gemini_masked_key": masked_key,
+        "gemini_model": settings.GEMINI_MODEL,
+        "has_fda_key": has_fda,
+        "fda_rate_limit": "240 req/min (Authenticated)" if has_fda else "40 req/min (Public tier)",
+        "app_mode": settings.APP_MODE,
+        "database": "sqlite"
+    }
+
+
+@router.get("/developer/users", tags=["Developer Settings"])
+def get_developer_users(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    """Developer Settings: Lists registered users in the database."""
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    return [
+        {
+            "id": u.id,
+            "name": u.name,
+            "email": u.email,
+            "role": u.role,
+            "created_at": u.created_at.isoformat() if u.created_at else None
+        }
+        for u in users
+    ]

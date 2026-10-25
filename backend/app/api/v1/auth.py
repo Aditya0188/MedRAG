@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, Request, status
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.models.entities import User, AuditEvent
-from app.schemas.schemas import LoginRequest, LoginResponse, UserResponse
+from app.models.entities import User, PatientProfile, AuditEvent
+from app.schemas.schemas import LoginRequest, RegisterRequest, LoginResponse, UserResponse
 from app.core.auth import (
+    hash_password,
     verify_password,
     create_access_token,
     require_user,
@@ -12,6 +13,77 @@ from app.core.auth import (
 from app.services.pipeline_orchestrator import add_audit_log
 
 router = APIRouter(tags=["Authentication"])
+
+
+@router.post("/auth/register", response_model=LoginResponse, status_code=status.HTTP_201_CREATED)
+def register(reg_data: RegisterRequest, response: Response, db: Session = Depends(get_db)):
+    """
+    Registers a new account (Patient or Doctor).
+    If role is 'patient', also creates their initial PatientProfile.
+    Automatically sets the JWT httpOnly session cookie and logs the user in.
+    """
+    email_clean = reg_data.email.strip().lower()
+    existing = db.query(User).filter(User.email == email_clean).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email address already exists. Please sign in instead."
+        )
+
+    # Hash password with bcrypt
+    hashed_pw = hash_password(reg_data.password)
+
+    new_user = User(
+        name=reg_data.name.strip(),
+        email=email_clean,
+        password_hash=hashed_pw,
+        role=reg_data.role
+    )
+    db.add(new_user)
+    db.flush()
+
+    if reg_data.role == "patient":
+        profile = PatientProfile(
+            user_id=new_user.id,
+            age=reg_data.age,
+            sex=reg_data.sex,
+            allergies=reg_data.allergies or [],
+            conditions=reg_data.conditions or [],
+            notes=reg_data.notes
+        )
+        db.add(profile)
+
+    token = create_access_token(
+        data={"sub": new_user.id, "email": new_user.email, "role": new_user.role, "name": new_user.name}
+    )
+
+    # Set httpOnly, SameSite=Lax cookie
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        max_age=60 * 60 * 24 * 7,  # 7 days
+        path="/"
+    )
+
+    add_audit_log(
+        db=db,
+        analysis_id=None,
+        event_type="register",
+        actor=new_user.name,
+        details={"email": new_user.email, "role": new_user.role},
+        user_id=new_user.id
+    )
+    db.commit()
+    db.refresh(new_user)
+
+    return LoginResponse(
+        message=f"Account created successfully. Welcome to MedDRAG, {new_user.name}.",
+        user=new_user,
+        token=token
+    )
 
 
 @router.post("/auth/login", response_model=LoginResponse)

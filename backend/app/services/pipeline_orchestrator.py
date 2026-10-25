@@ -264,7 +264,7 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
         # STAGE 6 & 7: Official Drug Labels Retrieved & Evidence Assembled
         # Concurrent execution with Semaphore(5), 10s timeouts, 2 retries
         # -------------------------------------------------------------
-        analysis.stage = "evidence_complete"
+        analysis.stage = "evidence_retrieved"
         db.query(Evidence).filter(Evidence.analysis_id == analysis_id).delete()
         db.commit()
 
@@ -400,7 +400,9 @@ async def execute_analysis_pipeline(analysis_id: str, db: Session) -> Analysis:
             for ev_list in all_ev_lists:
                 for ev in ev_list:
                     db.add(ev)
+            analysis.stage = "evidence_complete"
             db.commit()
+            add_audit_log(db, analysis_id, "evidence_assembly_completed")
 
         # -------------------------------------------------------------
         # STAGE 8: Doctor Review Required

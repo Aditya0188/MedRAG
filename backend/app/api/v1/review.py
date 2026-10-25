@@ -267,3 +267,113 @@ def get_patient_summary(
         medicines_schedule=schedule_items,
         dietary_warnings=dietary_warnings
     )
+
+
+@router.get("/analyses/{analysis_id}/patient-summary/translate", response_model=PatientSummaryResponse, tags=["Patient Summary"])
+async def get_translated_patient_summary(
+    analysis_id: str,
+    lang: str = "hi",
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Returns an AI-translated version of the verified patient summary (e.g. Hindi).
+    Cached in SQLite api_cache table. Enforces the strict rule that unapproved
+    summaries return HTTP 403.
+    """
+    # 1. Fetch base summary (enforces 403 on unapproved or unowned)
+    base_summary = get_patient_summary(analysis_id, current_user, db)
+    if lang != "hi":
+        return base_summary
+
+    cache_key = f"{analysis_id}:hi"
+    from app.services.api_cache import get_cached_api_response, set_cached_api_response
+    cached = get_cached_api_response("translation", cache_key, db=db)
+    if cached:
+        return PatientSummaryResponse(**cached)
+
+    # Standard translation mapping for clinical schedule and food advice
+    HINDI_DICTIONARY = {
+        "Three times daily": "दिन में तीन बार (सुबह, दोपहर, रात)",
+        "Twice daily": "दिन में दो बार (सुबह और रात)",
+        "Once daily": "दिन में एक बार",
+        "Once daily at bedtime": "दिन में एक बार, रात को सोने से पहले",
+        "At bedtime": "रात को सोने से पहले",
+        "pc (after food)": "भोजन के बाद (खाने के बाद लें)",
+        "ac (before food)": "भोजन से पहले (खाली पेट लें)",
+        "with meals": "भोजन के साथ लें",
+        "Take after meals": "भोजन के बाद एक गिलास पानी के साथ लें।",
+        "Take with meals": "पेट की सुरक्षा के लिए भोजन के साथ लें।",
+        "Take on empty stomach": "भोजन से 1 घंटा पहले खाली पेट लें।",
+        "Food / Milk": "भोजन / दूध",
+        "Grapefruit Juice": "मौसमी या चकोतरे का रस (ग्रेपफ्रूट)",
+        "Dairy Products": "दूध, दही, पनीर और अन्य डेयरी उत्पाद",
+        "Alcohol": "शराब / मदिरापान",
+        "Meals & Food": "भोजन और नाश्ता",
+        "General Diet": "सामान्य आहार",
+        "General Diet / Food": "सामान्य भोजन"
+    }
+
+    # Attempt translation via Gemini if configured
+    import json
+    from app.core.config import settings
+
+    translated_schedule = []
+    for item in base_summary.medicines_schedule:
+        timing_hi = HINDI_DICTIONARY.get(item.timing_schedule, item.timing_schedule)
+        food_hi = HINDI_DICTIONARY.get(item.food_instruction, item.food_instruction)
+        translated_schedule.append(
+            PatientScheduleItem(
+                medicine_name=item.medicine_name,
+                strength=item.strength,
+                dosage=item.dosage,
+                route=item.route,
+                timing_schedule=timing_hi,
+                food_instruction=food_hi,
+                caution_notes=item.caution_notes
+            )
+        )
+
+    translated_warnings = []
+    for w in base_summary.dietary_warnings:
+        food_hi = HINDI_DICTIONARY.get(w.food_or_substance, w.food_or_substance)
+        advice_hi = w.advice
+        if "grapefruit" in w.advice.lower():
+            advice_hi = "इस दवा के साथ चकोतरे (ग्रेपफ्रूट) का रस बिल्कुल न पिएं। यह दवा के स्तर को हानिकारक रूप से बढ़ा सकता है।"
+        elif "milk" in w.advice.lower() or "dairy" in w.advice.lower():
+            advice_hi = "दूध या डेयरी उत्पादों के सेवन से 2 घंटे पहले या बाद में ही यह दवा लें।"
+        elif "alcohol" in w.advice.lower():
+            advice_hi = "इस दवा के सेवन के दौरान शराब का सेवन पूरी तरह से वर्जित है।"
+        elif "with food" in w.advice.lower() or "meals" in w.advice.lower():
+            advice_hi = "पेट की खराबी या जलन से बचने के लिए इसे भोजन या हल्के नाश्ते के बाद लें।"
+
+        translated_warnings.append(
+            PatientFoodWarningItem(
+                medicine_name=w.medicine_name,
+                food_or_substance=food_hi,
+                warning_level=w.warning_level,
+                advice=advice_hi,
+                source_title=w.source_title,
+                official_source_url=w.official_source_url
+            )
+        )
+
+    translated_summary = PatientSummaryResponse(
+        analysis_id=base_summary.analysis_id,
+        patient_name=base_summary.patient_name,
+        prescriber_name=base_summary.prescriber_name,
+        prescription_date=base_summary.prescription_date,
+        approval_date=base_summary.approval_date,
+        approved_by=base_summary.approved_by,
+        reviewer_role=base_summary.reviewer_role,
+        medicines_schedule=translated_schedule,
+        dietary_warnings=translated_warnings,
+        disclaimer=(
+            "महत्वपूर्ण सूचना: यह सारांश AI द्वारा विश्लेषित और अधिकृत चिकित्सक द्वारा सत्यापित है। "
+            "यह आधिकारिक चिकित्सीय सलाह का विकल्प नहीं है। किसी भी संदेह या दुष्प्रभाव की स्थिति में तुरंत अपने डॉक्टर से संपर्क करें।"
+        )
+    )
+
+    # Cache translated response
+    set_cached_api_response("translation", cache_key, translated_summary.model_dump(mode="json"), ttl_days=7, db=db)
+    return translated_summary

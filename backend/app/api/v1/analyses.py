@@ -2,8 +2,9 @@ import asyncio
 import os
 import shutil
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query, status
-from fastapi.responses import FileResponse
+import json
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query, status, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
 from app.core.config import settings
@@ -372,6 +373,7 @@ def get_analysis_status(
         "handwriting_analyzed",
         "extraction_complete",
         "verification_complete",
+        "evidence_retrieved",
         "evidence_complete",
         "pending_review",
         "approved"
@@ -392,6 +394,127 @@ def get_analysis_status(
         total_processing_duration_sec=analysis.total_processing_duration_sec,
         stages_completed=stages_completed
     )
+
+@router.get("/analyses/{analysis_id}/events", tags=["Analyses"])
+async def stream_analysis_events(
+    request: Request,
+    analysis_id: str,
+    current_user: User = Depends(require_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Server-Sent Events (SSE) endpoint streaming real-time stage progress,
+    active status (pending/running/done/failed), and elapsed milliseconds.
+    Protected by RBAC: Patients can only stream events for their own analysis.
+    """
+    analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis record not found.")
+
+    if current_user.role == "patient" and analysis.patient_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: You may only stream pipeline events for your own prescriptions."
+        )
+
+    async def event_generator():
+        import time
+        start_t = time.time()
+        stage_order = [
+            ("uploaded", "Prescription Uploaded"),
+            ("quality_checked", "Image Quality Checked"),
+            ("handwriting_analyzed", "Handwriting Analyzed"),
+            ("extraction_complete", "Medicine Details Extracted"),
+            ("verification_complete", "Drug Names Verified"),
+            ("evidence_retrieved", "Official Drug Labels Retrieved"),
+            ("evidence_complete", "Evidence Assembled"),
+            ("pending_review", "Doctor Review Required")
+        ]
+
+        from app.db.session import SessionLocal
+        max_duration = 300  # 5 minutes safety timeout
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            stream_db = SessionLocal()
+            try:
+                curr = stream_db.query(Analysis).filter(Analysis.id == analysis_id).first()
+                if not curr:
+                    break
+
+                curr_stage = curr.stage
+                curr_status = curr.status
+                is_failed = curr_status == "failed"
+                is_done = curr_status == "completed" or curr.review_status in ("pending_review", "approved", "rejected")
+
+                if curr.total_processing_duration_sec and is_done:
+                    elapsed_ms = int(curr.total_processing_duration_sec * 1000)
+                else:
+                    elapsed_ms = int((time.time() - start_t) * 1000)
+
+                active_idx = 0
+                for i, (k, _) in enumerate(stage_order):
+                    if k == curr_stage:
+                        active_idx = i
+                        break
+
+                stages_payload = []
+                for i, (k, label) in enumerate(stage_order):
+                    if is_failed and k == curr.failed_stage:
+                        st_status = "failed"
+                    elif i < active_idx or (is_done and i <= active_idx):
+                        st_status = "done"
+                    elif i == active_idx and not is_done:
+                        st_status = "running"
+                    else:
+                        st_status = "pending"
+
+                    duration_est = int(elapsed_ms / max(1, active_idx + 1)) if st_status == "done" else (elapsed_ms if st_status == "running" else 0)
+                    stages_payload.append({
+                        "key": k,
+                        "label": label,
+                        "status": st_status,
+                        "duration_ms": duration_est
+                    })
+
+                overall_status = "failed" if is_failed else ("done" if is_done else "running")
+
+                data = {
+                    "analysis_id": analysis_id,
+                    "stage": curr_stage,
+                    "stage_index": active_idx,
+                    "status": overall_status,
+                    "elapsed_ms": elapsed_ms,
+                    "stages": stages_payload,
+                    "error_message": curr.error_message,
+                    "failed_stage": curr.failed_stage
+                }
+
+                yield f"data: {json.dumps(data)}\n\n"
+
+                if is_done or is_failed:
+                    break
+
+            finally:
+                stream_db.close()
+
+            if time.time() - start_t > max_duration:
+                break
+
+            await asyncio.sleep(0.35)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
 
 
 @router.post("/analyses/{analysis_id}/retry", response_model=AnalysisResponse, tags=["Analyses"])

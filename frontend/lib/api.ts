@@ -1,9 +1,45 @@
 /**
  * MedDRAG API Client
  * Connects Next.js frontend with FastAPI backend
+ * Full HTTP-only cookie credentials support and RBAC isolation
  */
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: "patient" | "doctor";
+  created_at: string;
+}
+
+export interface PatientProfile {
+  user_id: string;
+  name: string;
+  email: string;
+  age?: number | null;
+  sex?: string | null;
+  allergies: string[];
+  conditions: string[];
+  notes?: string | null;
+}
+
+export interface PatientListItem {
+  id: string;
+  name: string;
+  email: string;
+  age?: number | null;
+  sex?: string | null;
+  allergies: string[];
+  conditions: string[];
+  analysis_count: number;
+}
+
+export interface PatientDetail extends PatientListItem {
+  notes?: string | null;
+  analyses: AnalysisListItem[];
+}
 
 export interface ExtractedMedicine {
   id: string;
@@ -26,6 +62,7 @@ export interface ExtractedMedicine {
   alternatives_json: Array<{ rxcui: string; name: string; score: number; term_type?: string }>;
   reviewer_corrected: boolean;
   reviewer_notes?: string | null;
+  bounding_box?: number[] | null;
 }
 
 export interface Evidence {
@@ -60,6 +97,7 @@ export interface Review {
 export interface AuditEvent {
   id: string;
   analysis_id: string;
+  user_id?: string | null;
   event_type: string;
   actor: string;
   timestamp: string;
@@ -68,6 +106,7 @@ export interface AuditEvent {
 
 export interface Analysis {
   id: string;
+  patient_id?: string | null;
   original_filename: string;
   stored_filepath: string;
   file_checksum: string;
@@ -87,6 +126,8 @@ export interface Analysis {
   raw_ocr_baseline?: string | null;
   raw_ai_text?: string | null;
   review_status: "unreviewed" | "pending_review" | "approved" | "rejected";
+  rejection_reason?: string | null;
+  reviewed_at?: string | null;
   medicines: ExtractedMedicine[];
   evidences: Evidence[];
   reviews: Review[];
@@ -95,6 +136,8 @@ export interface Analysis {
 
 export interface AnalysisListItem {
   id: string;
+  patient_id?: string | null;
+  patient_name?: string | null;
   original_filename: string;
   created_at: string;
   stage: string;
@@ -177,14 +220,33 @@ export interface DemoScenario {
   evidence_count: number;
 }
 
+export interface StageItem {
+  key: string;
+  label: string;
+  status: "pending" | "running" | "done" | "failed";
+  duration_ms: number;
+}
+
+export interface StageProgressEvent {
+  analysis_id: string;
+  stage: string;
+  stage_index: number;
+  status: "pending" | "running" | "done" | "failed";
+  elapsed_ms: number;
+  stages: StageItem[];
+  error_message?: string | null;
+  failed_stage?: string | null;
+}
+
 // -------------------------------------------------------------
-// API Helper Functions
+// Base Fetch Wrapper with Credentials (httpOnly Cookies)
 // -------------------------------------------------------------
 
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
   const res = await fetch(url, {
     ...options,
+    credentials: "include", // Essential for httpOnly authentication cookie
     headers: {
       ...options?.headers,
     },
@@ -199,13 +261,75 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     } catch {
       // ignore
     }
-    throw new Error(errorDetail);
+
+    if (res.status === 401 && typeof window !== "undefined") {
+      const currentPath = window.location.pathname;
+      if (
+        currentPath !== "/login" &&
+        !endpoint.includes("/auth/login") &&
+        !endpoint.includes("/auth/register")
+      ) {
+        window.location.href = `/login?redirect=${encodeURIComponent(currentPath)}`;
+      }
+    }
+
+    const err = new Error(errorDetail) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
 
   return res.json();
 }
 
 export const api = {
+  // Authentication
+  login: (data: { email: string; password: string }) =>
+    request<{ user: User; token: string }>("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+
+  register: (data: {
+    name: string;
+    email: string;
+    password: string;
+    role: "patient" | "doctor";
+    age?: number | null;
+    sex?: string | null;
+    allergies?: string[];
+    conditions?: string[];
+    notes?: string | null;
+  }) =>
+    request<{ user: User; token: string; message: string }>("/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+
+  logout: () =>
+    request<{ message: string }>("/auth/logout", {
+      method: "POST",
+    }),
+
+  getMe: () => request<User>("/auth/me"),
+
+  // Patient Profile
+  getPatientProfile: () => request<PatientProfile>("/patients/me"),
+  updatePatientProfile: (data: { age?: number | null; sex?: string | null; allergies?: string[]; conditions?: string[]; notes?: string | null }) =>
+    request<PatientProfile>("/patients/me", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+
+  getPatients: (search?: string) => {
+    const q = search ? `?search=${encodeURIComponent(search)}` : "";
+    return request<PatientListItem[]>(`/patients${q}`);
+  },
+
+  getPatient: (id: string) => request<PatientDetail>(`/patients/${id}`),
+
   // Health
   getHealth: () => request<{ status: string; app_name: string; version: string; mode: string }>("/health"),
   getDependencies: () => request<DependencyHealth>("/health/dependencies"),
@@ -250,6 +374,8 @@ export const api = {
       stages_completed: string[];
     }>(`/analyses/${id}/status`),
 
+  getEventsUrl: (id: string) => `${API_BASE}/analyses/${id}/events`,
+
   retryAnalysis: (id: string) =>
     request<Analysis>(`/analyses/${id}/retry`, {
       method: "POST",
@@ -280,7 +406,7 @@ export const api = {
     return request<Evidence[]>(`/evidence/search?${q.toString()}`);
   },
 
-  // Review & Approval
+  // Review & Approval (Doctor Only)
   saveReviewDraft: (analysisId: string, data: { reviewer_name: string; reviewer_role?: string; review_notes?: string; review_duration_seconds?: number }) =>
     request<Review>(`/analyses/${analysisId}/review`, {
       method: "POST",
@@ -304,8 +430,10 @@ export const api = {
 
   // Patient Summary (Only accessible when approved)
   getPatientSummary: (analysisId: string) => request<PatientSummary>(`/analyses/${analysisId}/patient-summary`),
+  getTranslatedSummary: (analysisId: string, lang = "hi") =>
+    request<PatientSummary>(`/analyses/${analysisId}/patient-summary/translate?lang=${lang}`),
 
-  // API Key Management
+  // API Key Management (Doctor Only)
   updateApiKey: (apiKey: string) =>
     request<{ status: string; message: string; has_key: boolean }>("/settings/key", {
       method: "POST",
@@ -323,6 +451,44 @@ export const api = {
     }),
 
   getFdaKeyStatus: () => request<{ has_key: boolean; rate_limit: string }>("/settings/fda-key/status"),
+
+  // Developer Settings (Available to all authenticated/prototype users)
+  updateDeveloperApiKey: (apiKey: string, validate = false) =>
+    request<{ status: string; message: string; has_key: boolean; is_valid: boolean; model: string }>("/developer/key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey, validate_key: validate }),
+    }),
+
+  validateDeveloperApiKey: (apiKey: string) =>
+    request<{ is_valid: boolean; message: string; model: string }>("/developer/key/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+
+  updateDeveloperFdaApiKey: (apiKey: string) =>
+    request<{ status: string; message: string; has_key: boolean; rate_limit: string }>("/developer/fda-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+
+  getDeveloperStatus: () =>
+    request<{
+      has_gemini_key: boolean;
+      gemini_masked_key: string;
+      gemini_model: string;
+      has_fda_key: boolean;
+      fda_rate_limit: string;
+      app_mode: string;
+      database: string;
+    }>("/developer/status"),
+
+  getDeveloperUsers: () =>
+    request<Array<{ id: string; name: string; email: string; role: string; created_at: string | null }>>(
+      "/developer/users"
+    ),
 
   // Demo Controls
   getDemoScenarios: () => request<DemoScenario[]>("/demo/scenarios"),
